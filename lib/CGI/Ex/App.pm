@@ -11,9 +11,11 @@ package CGI::Ex::App;
 
 
 use strict;
-use vars qw($EXT_PRINT $EXT_VAL $BASE_DIR_REL $BASE_DIR_ABS $BASE_NAME_MODULE
+use vars qw($VERSION
+            $EXT_PRINT $EXT_VAL $BASE_DIR_REL $BASE_DIR_ABS $BASE_NAME_MODULE
             %CLEANUP_EXCLUDE);
 
+$VERSION = '1.12';
 use CGI::Ex::Dump qw(debug);
 
 BEGIN {
@@ -85,17 +87,18 @@ sub navigate {
     }
 
     ### get a hash of valid paths (if any)
-    my $valid_paths = $self->valid_paths;
+    my $valid_steps = $self->valid_steps;
 
     ### iterate on each step of the path
-    foreach (my $i = 0; $i <= $#$path; $i ++) {
-      $self->{path_i} = $i;
-      my $step = $path->[$i];
+    foreach ($self->{path_i} ||= 0;
+             $self->{path_i} <= $#$path;
+             $self->{path_i} ++) {
+      my $step = $path->[$self->{path_i}];
       next if $step !~ /^\w+$/; # don't process the step if it contains odd characters
 
       ### check if this is an allowed step
-      if ($valid_paths) {
-        if (! $valid_paths->{$step}
+      if ($valid_steps) {
+        if (! $valid_steps->{$step}
             && $step ne $self->default_step
             && $step ne 'forbidden') {
           $self->stash->{'forbidden_step'} = $step;
@@ -116,33 +119,38 @@ sub navigate {
       ### see if we have complete valid information for this step
       ### if so, do the next step
       ### if not, get necessary info and print it out
-      if (! $self->run_hook($step,'info_complete')) {
-        my $formhash = $self->run_hook($step, 'hash_form',   \&form);
-        my $fillhash = $self->run_hook($step, 'hash_fill',   {});
-        my $errhash  = $self->run_hook($step, 'hash_errors', {});
-        my $commhash = $self->run_hook($step, 'hash_common', {});
+      if (   ! $self->run_hook($step, 'prepare', 1)
+          || ! $self->run_hook($step, 'info_complete')
+          || ! $self->run_hook($step, 'finalize', 1)) {
+        my $hash_form = $self->run_hook($step, 'hash_form');
+        my $hash_fill = $self->run_hook($step, 'hash_fill');
+        my $hash_errs = $self->run_hook($step, 'hash_errors');
+        my $hash_comm = $self->run_hook($step, 'hash_common');
 
-        ### layer basic form on top of fill
-        foreach my $key (keys %$formhash) {
-          next if exists $fillhash->{$key};
-          $fillhash->{$key} = $formhash->{$key};
+        ### fix up errors
+        $hash_errs->{$_} = $self->format_error($hash_errs->{$_})
+          foreach keys %$hash_errs;
+        $hash_errs->{has_errors} = 1 if scalar keys %$hash_errs;
+
+        ### compose $fill of fill and form
+        my $fill = {};
+        foreach my $hash ($hash_fill, $hash_form) {
+          foreach my $key (keys %$hash) {
+            $fill->{$key} = $hash->{$key} if ! exists $fill->{$key};
+          }
         }
 
-        ### layer common elements on top of form
-        foreach my $key (keys %$commhash) {
-          next if exists $formhash->{$key};
-          $formhash->{$key} = $commhash->{$key};
-        }
-
-        ### layer errors on top of form
-        $formhash->{has_errors} = 1 if scalar keys %$errhash;
-        foreach my $key (keys %$errhash) {
-          $formhash->{$key} = $self->format_error($errhash->{$key});
+        ### compose $form of form, common, and errors
+        my $form = {};
+        foreach my $hash ($hash_form, $hash_comm, $hash_errs) {
+          foreach my $key (keys %$hash) {
+            $form->{$key} = $hash->{$key} if ! exists $form->{$key};
+          }
         }
 
         ### run the print hook - passing it the form and fill info
         $self->run_hook($step, 'print', undef,
-                        $formhash, $fillhash);
+                        $form, $fill);
 
         ### a hook after the printing process
         $self->run_hook($step, 'post_print');
@@ -193,9 +201,9 @@ sub default_step {
   return $self->{'default_step'} || 'main';
 }
 
-sub path_key {
+sub step_key {
   my $self = shift;
-  return $self->{'path_key'} || 'step';
+  return $self->{'step_key'} || 'step';
 }
 
 ### determine the path to follow
@@ -203,9 +211,9 @@ sub path {
   my $self = shift;
   return $self->{path} ||= do {
     my @path     = (); # default to empty path
-    my $path_key = $self->path_key;
+    my $step_key = $self->step_key;
 
-    if (my $step = $self->form->{$path_key}) {
+    if (my $step = $self->form->{$step_key}) {
       push @path, $step;
     } elsif ($ENV{PATH_INFO} && $ENV{PATH_INFO} =~ m|^/(\w+)|) {
       push @path, lc($1);
@@ -260,7 +268,7 @@ sub insert_path {
 }
 
 ### a hash of paths that are allowed, default undef is all
-sub valid_paths {}
+sub valid_steps {}
 
 ###----------------------------------------------------------------###
 
@@ -541,6 +549,49 @@ sub add_property {
 }
 
 ###----------------------------------------------------------------###
+### js_validation items
+
+### creates javascript suitable for validating the form
+sub js_validation {
+  my $self = shift;
+  my $step = shift;
+  return '' if $self->ext_val eq 'htm'; # let htm validation do it itself
+
+  my $form_name = $self->run_hook($step, 'form_name');
+  my $hash_val  = $self->run_hook($step, 'hash_validation', {});
+  my $js_uri    = $self->js_uri_path;
+  return '' if ! scalar keys %$hash_val;
+
+  return $self->vob->generate_js($hash_val, $form_name, $js_uri);
+}
+
+### where to find the javascript files
+### default to using this script as a handler
+sub js_uri_path {
+  my $self   = shift;
+  my $script = $ENV{'SCRIPT_NAME'} || die "Missing SCRIPT_NAME";
+  return ($self->can('path') == \&CGI::Ex::App::path)
+    ? $script . '/js' # try to use a cache friendly URI (if path is our own)
+    : $script . '?'.$self->step_key.'=js&js='; # use one that works with more paths
+}
+
+### name to attach js validation to
+sub form_name { 'theform' }
+
+### provide some rudimentary javascript support
+### if valid_steps is defined - it should include "js"
+sub js_pre_step {
+  my $self = shift;
+
+  ### make sure path info looks like /js/CGI/Ex/foo.js
+  my $file = $self->form->{'js'} || $ENV{'PATH_INFO'} || '';
+  $file = ($file =~  m!^(?:/js/|/)?(\w+(?:/\w+)*\.js)$!) ? $1 : '';
+
+  $self->cgix->print_js($file);
+  return 1;
+}
+
+###----------------------------------------------------------------###
 ### implementation specific subs
 
 sub template_args {
@@ -720,35 +771,67 @@ sub validate {
   my $step = shift;
   my $form = $self->form;
   my $hash = $self->run_hook($step, 'hash_validation', {});
+  my $what_was_validated = [];
 
-  my $eob = eval { $self->vob->validate($form, $hash) };
+  my $eob = eval { $self->vob->validate($form, $hash, $what_was_validated) };
   if (! $eob && $@) {
     die "Step $step: $@";
   }
 
-  ### if no errors return true
-  return 1 if ! $eob;
+  ### had an error - store the errors and return false
+  if ($eob) {
+    $self->add_errors($eob->as_hash({
+      as_hash_join   => "<br>\n",
+      as_hash_suffix => '_error',
+    }));
+    return 0;
+  }
 
-  ### store the errors and return false
-  $self->add_errors($eob->as_hash({
-    as_hash_join   => "<br>\n",
-    as_hash_suffix => '_error',
-  }));
+  ### allow for the validation to give us some redirection
+  my $val;
+  foreach my $ref (@$what_was_validated) {
+    foreach my $method (qw(append_path replace_path insert_path)) {
+      next if ! ($val = $ref->{$method});
+      $self->$method(ref $val ? @$val : $val);
+    }
+  }
 
-  return 0;
+  return 1;
 }
 
+### allow for using ConfUtil instead of yaml
 sub hash_validation {
   my $self = shift;
   my $step = shift;
-  my $file = $self->run_hook($step, 'file_val');
-  require CGI::Ex::Validate;
-  return CGI::Ex::Validate->new->get_validation($file);
+  return $self->{hash_validation}->{$step} ||= do {
+    my $hash;
+    my $file = $self->run_hook($step, 'file_val');
+
+    ### allow for returning the validation hash in the filename
+    ### a scalar ref means it is a yaml document to be read by get_validation
+    if (ref($file) && ! UNIVERSAL::isa($file, 'SCALAR')) {
+      $hash = $file;
+
+    ### read the file - it it fails - errors should shown in the error logs
+    } elsif ($file) {
+      $hash = eval { $self->vob->get_validation($file) } || {};
+
+    } else {
+      $hash = {};
+    }
+
+    $hash; # return of the do
+  };
 }
 
 sub hash_common {
   my $self = shift;
-  return $self->{hash_common} ||= {};
+  my $step = shift;
+  return $self->{hash_common} ||= {
+### don't force these to always be there
+#    js_validation => $self->run_hook($step, 'js_validation'),
+#    form_name     => $self->run_hook($step, 'form_name'),
+  };
 }
 
 sub hash_errors {
@@ -785,7 +868,15 @@ __END__
 
 =head1 NAME
 
-CGI::Ex::App - Simple CGI::Application type module
+CGI::Ex::App - Full featured (within reason) application builder.
+
+=head1 DESCRIPTION
+
+Fill in the blanks and get a ready made CGI.  This module is somewhat
+similar in spirit to CGI::Application, CGI::Path, and CGI::Builder and any
+other "CGI framework."  As with the others, CGI::Ex::App tries to do as
+much as possible, in a simple manner, without getting in the
+developer's way.  Your milage may vary.
 
 =head1 SYNOPSIS
 
@@ -794,9 +885,9 @@ More examples will come with time.  Here are the basics for now.
   #!/usr/bin/perl -w
 
   MyApp->navigate;
-  # OR you could do the following which cleans
-  # circular references - useful for a mod_perl situation
-  # MyApp->navigate->cleanup;
+   # OR you could do the following which cleans
+   # circular references - useful for a mod_perl situation
+   # MyApp->navigate->cleanup;
   exit;
 
   package MyApp;
@@ -804,29 +895,34 @@ More examples will come with time.  Here are the basics for now.
   use base qw(CGI::Ex::App);
   use CGI::Ex::Dump qw(debug);
 
-  sub valid_paths { return {success => 1} }
+  sub valid_paths { return {success => 1, js => 1} }
     # default_step (main) is a valid path
+    # note the inclusion of js step for js_validation
 
   # base_dir_abs is only needed if default print is used
   # template toolkit needs an INCLUDE_PATH
   sub base_dir_abs { '/tmp' }
 
   sub main_file_print {
-    # reference to string is content
+    # reference to string means ref to content
     # non-reference means filename
-    return \"<h1>Main Step</h1>
-    <form method=post>
-    <input type=text name=foo><span style='color:red'>[% foo_error %]</span><br>
+    return \ "<h1>Main Step</h1>
+    <form method=post name=[% form_name %]>
+    <input type=text name=foo>
+    <span style='color:red' id=foo_error>[% foo_error %]</span><br>
     <input type=submit>
     </form>
-    <a href='$ENV{SCRIPT_NAME}?step=foo'>Link to forbidden step</a>
+    [% js_validation %]
+    <a href='[% script_name %]?step=foo'>Link to forbidden step</a>
     ";
   }
 
+  sub post_print { debug shift->{history} } # show what happened
+
   sub main_file_val {
-    # reference to string is yaml
+    # reference to string means ref to yaml document
     # non-reference means filename
-    return \"foo:
+    return \ "foo:
       required: 1
       min_len: 2
       max_len: 20
@@ -835,9 +931,8 @@ More examples will come with time.  Here are the basics for now.
       \n";
   }
 
-  sub main_info_complete {
+  sub main_finalize {
     my $self = shift;
-    return 0 if ! $self->SUPER::info_complete(@_);
 
     debug $self->form, "Do something useful with form here";
 
@@ -848,18 +943,27 @@ More examples will come with time.  Here are the basics for now.
   }
 
   sub success_file_print {
-    \"<h1>Success Step</h1> All done";
+    \ "<h1>Success Step</h1> All done";
+  }
+
+  sub hash_common { # used to include js_validation
+    my $self = shift;
+    my $step = shift;
+    return $self->{hash_common} ||= {
+      script_name   => $ENV{SCRIPT_NAME},
+      js_validation => $self->run_hook($step, 'js_validation'),
+      form_name     => $self->run_hook($step, 'form_name'),
+    };
   }
 
   __END__
 
-=head1 DESCRIPTION
-
-Fill in the blanks and get a ready made CGI.  This module is somewhat
-similar to CGI::Application and CGI::Path and CGI::Builder and any
-other "CGI framework."  As with the others, CGI::App tries to do as
-much as possible, in a simple manner, without getting in the
-developer's way.  Your milage may vary.
+Note: This example would be considerably shorter if the html file
+(file_print) and the validation file (file_val) had been placed in
+separate files.  Though CGI::Ex::App will work "out of the box" as
+shown it is more probable that any platform using it will customize
+the various hooks to their own tastes (for example, switching print to
+use a system other than Template::Toolkit).
 
 =head1 HOOKS / METHODS
 
@@ -902,12 +1006,12 @@ are shown):
     ->path (get the path steps)
        # DEFAULT ACTION
        # look in $ENV{'PATH_INFO'}
-       # look in ->form for ->path_key
+       # look in ->form for ->step_key
 
     ->pre_loop
        # navigation stops if true
 
-    ->valid_paths (get list of valid paths)
+    ->valid_steps (get list of valid paths)
 
     foreach step of path {
 
@@ -923,7 +1027,9 @@ are shown):
       ->pre_step (hook)
         # skips this step if true
 
-      ->info_complete (hook)
+      ->prepare (hook - defaults to true)
+
+      ->info_complete (hook - ran if prepare was true)
         # DEFAULT ACTION
         # ->ready_validate (hook)
         # return false if ! ready_validate
@@ -933,7 +1039,9 @@ are shown):
         #   uses CGI::Ex::Validate to validate the hash
         # returns true if validate is true
 
-      if ! info_complete {
+      ->finalize (hook - defaults to true - ran if prepare and info_complete were true)
+
+      if ! ->prepare || ! ->info_complete || ! ->finalize {
         ->hash_form (hook)
         ->hash_fill (hook)
         ->hash_errors (hook)
@@ -980,7 +1088,7 @@ ran using the method "run_hook" which uses the method "hook" to lookup
 the hook.  A history of ran hooks is stored in $self->{history}.
 Default will be a single step path looked up in $form->{path} or in
 $ENV{PATH_INFO}.  By default, path will look for $ENV{'PATH_INFO'} or
-the value of the form by the key path_key.  For the best
+the value of the form by the key step_key.  For the best
 functionality, the arrayref returned should be the same reference
 returned for every call to path - this ensures that other methods can
 add to the path (and will most likely break if the arrayref is not the
@@ -992,7 +1100,7 @@ in default_step will be run.
 Step to show if the path runs out of steps.  Default value is the
 'default_step' property or the value 'main'.
 
-=item Method C<-E<gt>path_key>
+=item Method C<-E<gt>step_key>
 
 Used by default to determine which step to put in the path.  The
 default path will only have one step within it
@@ -1017,13 +1125,15 @@ Replaces the remaining steps (if any) of the current path.
 Arguments are the steps to insert.  Can be called any time.  Inserts
 the new steps at the current path location.
 
-=item Method C<-E<gt>valid_paths>
+=item Method C<-E<gt>valid_steps>
 
 Returns a hashref of path steps that are allowed.  If step found in
 default method path is not in the hash, the method path will return a
 single step "forbidden" and run its hooks.  If no hash or undef is
 returned, all paths are allowed (default).  A key "forbidden_step"
 containing the step that was not valid will be placed in the stash.
+Often the valid_steps method does not need to be defined as arbitrary
+method calls are not possible with CGI::Ex::App.
 
 =item Method C<-E<gt>previous_step, -E<gt>current_step, -E<gt>next_step>
 
@@ -1145,22 +1255,39 @@ Ran at the beginning of the loop before info_compelete is called.  If
 it returns true, execution of navigate is returned and no more steps
 are processed.
 
+=item Hook C<-E<gt>prepare>
+
+Defaults to true.  A hook before checking if the info_complete is true.
+
 =item Hook C<-E<gt>info_complete>
 
 Checks to see if all the necessary form elements have been passed in.
-Calls hooks ready_validate, and validate.
+Calls hooks ready_validate, and validate.  Will not be run unless
+prepare returns true (default).
+
+=item Hook C<-E<gt>finalize>
+
+Defaults to true. Used to do whatever needs to be done with the data once
+prepare has returned true and info_complete has returned true.  On failure
+the print operations are ran.  On success navigation moves on to the next
+step.
 
 =item Hook C<-E<gt>ready_validate>
 
 Should return true if enough information is present to run validate.
 Default is to look if $ENV{'REQUEST_METHOD'} is 'POST'.  A common
 usage is to pass a common flag in the form such as 'processing' => 1
-and check for its presence.
+and check for its presence - such as the following:
+
+  sub ready_validate { shift->form->{'processing'} }
 
 =item Method C<-E<gt>set_ready_validate>
 
 Sets that the validation is ready to validate.  Should set the value
-checked by the hook ready_validate.
+checked by the hook ready_validate.  The following would complement the
+processing flag above:
+
+  sub set_ready_validate { shift->form->{'processing'} = shift }
 
 =item Hook C<-E<gt>validate>
 
@@ -1172,11 +1299,23 @@ in $self->{hash_errors} via method add_errors and can be checked for
 at a later time with method has_errors (if the default validate was
 used).
 
+Upon success, it will look through all of the items which
+were validated, if any of them contain the keys append_path, insert_path,
+or replace_path, that method will be called with the value as arguments.
+This allows for the validation to apply redirection to the path.  A
+validation item of:
+
+  {field => 'foo', required => 1, append_path => ['bar', 'baz']}
+
+would append 'bar' and 'baz' to the path should all validation succeed.
+
 =item Hook C<-E<gt>hash_validation>
 
 Returns a hash of the validation information to check form against.
 By default, will look for a filename using the hook file_val and will
-pass it to CGI::Ex::Validate::get_validation.
+pass it to CGI::Ex::Validate::get_validation.  If no file_val is
+returned or if the get_validation fails, an empty hash will be returned.
+Validation is implemented by ->vob which loads a CGI::Ex::Validate object.
 
 =item Hook C<-E<gt>file_val>
 
@@ -1186,34 +1325,77 @@ default file extension found in $self->ext_val which defaults to the
 global $EXT_VAL (the property $self->{ext_val} may also be set).  File
 should be readible by CGI::Ex::Validate::get_validation.
 
+=item Hook C<-E<gt>js_validation>
+
+Will return Javascript that is capable of validating the form.  This
+is done using the capabilities of CGI::Ex::Validate.  This will call
+the hook hash_validation which will then be encoded into yaml and
+placed in a javascript string.  It will also call the hook form_name
+to determine which html form to attach the validation to.  The method
+js_uri_path is called to determine the path to the appropriate
+yaml_load.js and validate.js files.  If the method ext_val is htm,
+then js_validation will return an empty string as it assumes the htm
+file will take care of the validation itself.  In order to make use
+of js_validation, it must be added to either the hash_common or
+hash_form hook (see examples of hash_common used in this doc).
+
+=item Hook C<-E<gt>form_name>
+
+Return the name of the form to attach the js validation to.  Used by
+js_validation.
+
+=item Method C<-E<gt>js_uri_path>
+
+Return the URI path where the CGI/Ex/yaml_load.js and
+CGI/Ex/validate.js files can be found.  This will default to
+"$ENV{SCRIPT_NAME}/js" if the path method has not been overridden,
+otherwise it will default to "$ENV{SCRIPT_NAME}?step=js&js=" (the
+latter is more friendly with overridden paths).  A default handler for
+the "js" step has been provided in "js_pre_step" (this handler will
+nicely print out the javascript found in the js files which are
+included with this distribution - if valid_steps is defined, it must
+include the step "js" - js_pre_step will work properly with the
+default "path" handler.
+
 =item Hook C<-E<gt>hash_form>
 
-Called in preparation for print after failed info_complete.  Should
-contain a hash of any items needed to be swapped into the html during
-print.
+Called in preparation for print after failed prepare, info_complete,
+or finalize.  Should contain a hash of any items needed to be swapped
+into the html during print.
 
 =item Hook C<-E<gt>hash_fill>
 
-Called in preparation for print after failed info_complete.  Should
-contain a hash of any items needed to be filled into the html form
-during print.  Items from hash_form will be layered on top during a
-print cycle.
+Called in preparation for print after failed prepare, info_complete,
+or finalize.  Should contain a hash of any items needed to be filled
+into the html form during print.  Items from hash_form will be layered
+on top during a print cycle.
 
 =item Hook C<-E<gt>hash_errors>
 
-Called in preparation for print after failed info_complete.  Should
-contain a hash of any errors that occured.  Will be merged into
-hash_form before the pass to print.  Eash error that occured will be
-passed to method format_error before being added to the hash.  If an
-error has occurred, the default validate will automatically add
-{has_errors =>1}.  To the error hash at the time of validation.
-has_errors will also be added during the merge incase the default
-validate was not used.
+Called in preparation for print after failed prepare, info_complete,
+or finalize.  Should contain a hash of any errors that occured.  Will
+be merged into hash_form before the pass to print.  Eash error that
+occured will be passed to method format_error before being added to
+the hash.  If an error has occurred, the default validate will
+automatically add {has_errors =>1}.  To the error hash at the time of
+validation.  has_errors will also be added during the merge incase the
+default validate was not used.
 
 =item Hook C<-E<gt>hash_common>
 
 A hash of common items to be merged with hash_form - such as pulldown
-menues.
+menues.  By default it is empty, but it would be wise to add the
+following to allow for js_validation (if needed):
+
+  sub hash_common {
+    my $self = shift;
+    my $step = shift;
+    return $self->{hash_common} ||= {
+      script_name   => $ENV{SCRIPT_NAME},
+      js_validation => $self->run_hook($step, 'js_validation'),
+      form_name     => $self->run_hook($step, 'form_name'),
+    };
+  }
 
 =item Hook C<-E<gt>name_module>
 
@@ -1248,17 +1430,19 @@ database query.
 
 =item Hook C<-E<gt>post_step>
 
-Ran at the end of the step's loop if info_complete returned true.
-Allows for cleanup.  If a true value is returned, execution of
-navigate is returned and no more steps are processed.
+Ran at the end of the step's loop if prepare, info_complete, and
+finalize all returned true.  Allows for cleanup.  If a true value is
+returned, execution of navigate is returned and no more steps are
+processed.
 
 =item Method C<-E<gt>post_loop>
 
 Ran after all of the steps in the loop have been processed (if
-info_complete was true for each of the steps).  If it returns a true
-value the navigation loop will be aborted.  If it does not return
-true, navigation continues by then running $self->navigate({path =>
-[$self->default_step]}) to fall back to the default step.
+prepare, info_complete, and finalize were true for each of the steps).
+If it returns a true value the navigation loop will be aborted.  If it
+does not return true, navigation continues by then running
+$self->navigate({path => [$self->default_step]}) to fall back to the
+default step.
 
 =item Method C<-E<gt>stash>
 
