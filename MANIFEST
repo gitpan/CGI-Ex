@@ -58,7 +58,6 @@ t/3_conf_00_base.t
 t/4_app_00_base.t
 t/5_dump_00_base.t
 t/6_die_00_base.t
-t/7_wrap_base.t
 t/samples/bench_cgix_hfif.pl
 t/samples/bench_conf_readers.pl
 t/samples/bench_method_calling.pl
