@@ -1,10 +1,14 @@
 package CGI::Ex::Die;
 
 use strict;
-use vars qw($no_recurse);
+use vars qw($no_recurse $EXTENDED_ERRORS);
 
 use CGI::Ex;
-use CGI::Ex::Dump qw(dex);
+use CGI::Ex::Dump qw(debug);
+
+BEGIN {
+  $EXTENDED_ERRORS = 1 if ! defined $EXTENDED_ERRORS;
+}
 
 ###----------------------------------------------------------------###
 
@@ -58,9 +62,22 @@ sub die_handler {
   ### decode the message
   if (ref $err) {
 
+  } elsif ($EXTENDED_ERRORS && $err) {
+    my $copy = "$err";
+    if ($copy =~ m|^Execution of ([/\w\.\-]+) aborted due to compilation errors|si) {
+      eval {
+        local $SIG{__WARN__} = sub {};
+        require $1;
+      };
+      my $error = $@ || '';
+      $error =~ s|Compilation failed in require at [/\w/\.\-]+/Die.pm line \d+\.\s*$||is;
+      chomp $error;
+      $err .= "\n($error)\n";
+    } elsif ($copy =~ m|^syntax error at ([/\w.\-]+) line \d+, near|mi) {
+    }
   }
   my $msg = &CGI::Ex::Dump::_html_quote("$err");
-  $msg = "<span style='background:red;color:white;border:2px solid black;font-size:120%;whitespace:pre;padding:3px'>Error: $msg</span>\n";
+  $msg = "<pre style='background:red;color:white;border:2px solid black;font-size:120%;padding:3px'>Error: $msg</pre>\n";
 
   ### similar to CGI::Carp
   if ($ENV{MOD_PERL} && (my $r = Apache->request)) {

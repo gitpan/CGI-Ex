@@ -21,7 +21,7 @@ use vars qw($VERSION
             @UNSUPPORTED_BROWSERS
             );
 
-$VERSION = '0.99';
+$VERSION = '1.00';
 
 $ERROR_PACKAGE = 'CGI::Ex::Validate::Error';
 $DEFAULT_EXT   = 'val';
@@ -236,7 +236,11 @@ sub check_conditional {
         $found = 1; # reset
         next;
       } else {
-        $ref = {field => $ref, required => 1};
+        if ($ref =~ s/^\s*!\s*//) {
+          $ref = {field => $ref, max_in_set => "0 of $ref"};
+        } else {
+          $ref = {field => $ref, required => 1};
+        }
       }
     }
     last if ! $found;
@@ -281,6 +285,13 @@ sub validate_buddy {
     return wantarray ? @errors : scalar @errors;
   }
 
+  ### allow for default value
+  foreach my $type ($self->filter_type('default', $types)) {
+    if (! defined($form->{$field}) || (! ref($form->{$field}) && ! length($form->{$field}))) {
+      $form->{$field} = $field_val->{$type};
+    }
+  }
+
   my $n_values = UNIVERSAL::isa($form->{$field},'ARRAY') ? $#{ $form->{$field} } + 1 : 1;
   my $values = ($n_values > 1) ? $form->{$field} : [$form->{$field}];
 
@@ -302,7 +313,7 @@ sub validate_buddy {
     }
   }
   # allow for inline specified modifications (ie s/foo/bar/)
-  foreach my $type ($self->filter_type('replace',$types)) { 
+  foreach my $type ($self->filter_type('replace',$types)) {
     my $ref = UNIVERSAL::isa($field_val->{$type},'ARRAY') ? $field_val->{$type}
       : [split(/\s*\|\|\s*/,$field_val->{$type})];
     foreach my $rx (@$ref) {
@@ -409,6 +420,29 @@ sub validate_buddy {
       return @errors;
     }
   }
+
+  ### max_in_set and min_in_set checks
+  foreach my $minmax (qw(min max)) {
+    my @keys = $self->filter_type("${minmax}_in_set",$types);
+    foreach my $type (@keys) {
+      $field_val->{$type} =~ m/^\s*(\d+)(?i:\s*of)?\s+(.+)\s*$/
+        || die "Invalid in_set check $field_val->{$type}";
+      my $n = $1;
+      foreach my $_field (split /[\s,]+/, $2) {
+        my $ref = UNIVERSAL::isa($form->{$_field},'ARRAY') ? $form->{$_field} : [$form->{$_field}];
+        foreach my $_value (@$ref) {
+          $n -- if defined($_value) && length($_value);
+        }
+      }
+      if (   ($minmax eq 'min' && $n > 0)
+          || ($minmax eq 'max' && $n < 0)) {
+        return 1 if ! wantarray;
+        $self->add_error(\@errors, $field, $type, $field_val, $ifs_match);
+        return @errors;
+      }
+    }
+  }
+
 
   ### loop on values of field
   foreach my $value (@$values) {
@@ -992,6 +1026,14 @@ sub get_error_text {
       my $char = ($n == 1) ? 'character' : 'characters';
       $return = "$name was more than $n $char.";
 
+    } elsif ($type eq 'max_in_set') {
+      my $set = $field_val->{"max_in_set${dig}"};
+      $return = "Too many fields were chosen from the set ($set)";
+
+    } elsif ($type eq 'min_in_set') {
+      my $set = $field_val->{"min_in_set${dig}"};
+      $return = "Not enough fields were chosen from the set ($set)";
+
     } elsif ($type eq 'match') {
       $return = "$name contains invalid characters.";
 
@@ -1029,7 +1071,7 @@ __END__
 
 CGI::Ex::Validate - Yet another form validator - does good javascript too
 
-$Id: Validate.pm,v 1.57 2004/03/22 20:52:21 pauls Exp $
+$Id: Validate.pm,v 1.63 2004/04/23 16:00:11 pauls Exp $
 
 =head1 SYNOPSIS
 
@@ -1341,6 +1383,10 @@ if the conditions are met.  Works in JS.
   # SAME as
   validate_if => {field => 'name', required => 1},
 
+  validate_if => '! name',
+  # SAME as
+  validate_if => {field => 'name', max_in_set => '0 of name'},
+
   validate_if => {field => 'country', compare => "eq US"},
   # only if country's value is equal to US
 
@@ -1396,6 +1442,23 @@ no other checks will be run.
 Allows for specifying the maximum number of form elements passed.
 max_values defaults to 1 (You must explicitly set it higher
 to allow more than one item by any given name).
+
+=item C<min_in_set> and C<max_in_set>
+
+Somewhat like min_values and max_values except that you specify the
+fields that participate in the count.  Also - entries that are not
+defined or do not have length are not counted.  An optional "of" can
+be placed after the number for human readibility.
+
+  min_in_set => "2 of foo bar baz",
+    # two of the fields foo, bar or baz must be set
+    # same as
+  min_in_set => "2 foo bar baz",
+    # same as 
+  min_in_set => "2 OF foo bar baz",
+
+  validate_if => {field => 'whatever', max_in_set => '0 of whatever'},
+    # only run validation if there were zero occurances of whatever
 
 =item C<enum>
 
@@ -1609,6 +1672,14 @@ Pass a swap pattern to change the actual value of the form.
 Any perl regex can be passed.
 
   {field => 'foo', replace => 's/(\d{3})(\d{3})(\d{3})/($1) $2-$3/'}
+
+=item C<default>
+
+Set item to default value if there is no existing value (undefined
+or zero length string).  Maybe someday well add default_if (but that
+would require some odd syntax for both the conditional and the default).
+
+  {field => 'country', default => 'EN'}
 
 =item C<to_upper_case> and C<to_lower_case>
 

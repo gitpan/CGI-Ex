@@ -208,7 +208,7 @@ METHODS
             validation file will be read in depending upon file extension.
 
     "->get_form"
-        Very similar to CGI->new->Val except that arrays are returned as
+        Very similar to CGI->new->Vars except that arrays are returned as
         arrays. Not sure why CGI::Val didn't do this anyway.
 
     "->set_form"

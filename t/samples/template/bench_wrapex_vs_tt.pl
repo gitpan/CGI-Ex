@@ -57,6 +57,20 @@ This is some text.
 [shell.footer]
 ";
 
+my $content_w2 = "[(( shell.header )
+( shell.start ))]
+
+[( if a.foo {
+This is some text.
+} )]
+
+[( loop i a.stuff->size {[(a.stuff)]} )]
+[( pass_in_something )]
+
+[((shell.end)
+ (shell.footer))]
+";
+
 my $content_l = "[% shell.header %]
 [% shell.start %]
 

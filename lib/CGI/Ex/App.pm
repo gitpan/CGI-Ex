@@ -13,7 +13,7 @@ package CGI::Ex::App;
 use strict;
 use vars qw($EXT_PRINT $EXT_VAL $BASE_DIR_REL $BASE_DIR_ABS);
 
-use CGI::Ex::Dump qw(dex);
+use CGI::Ex::Dump qw(debug);
 
 BEGIN {
   ### Default file locations
@@ -73,7 +73,7 @@ sub navigate {
 
       ### if the pre_step exists and returns true, return from navigate
       my $hook = $self->hook($step,'pre_step');
-      if ($hook && $self->$hook()) {
+      if ($hook && $self->$hook($step)) {
         $self->unmorph($step);
         return;
       }
@@ -114,7 +114,7 @@ sub navigate {
       ### a hook before end of loop
       ### if the post_step exists and returns true, return from navigate
       $hook = $self->hook($step,'post_step');
-      if ($hook && $self->$hook()) {
+      if ($hook && $self->$hook($step)) {
         $self->unmorph($step);
         return;
       }
@@ -144,12 +144,17 @@ sub navigate {
   return;
 }
 
+sub path_key {
+  return 'step';
+}
+
 ### determine the path to follow
 sub path {
   my $self = shift;
   return $self->{path} ||= do {
     my $form = $self->form;
-    my $step = $form->{step};
+    my $key  = $self->path_key;
+    my $step = $form->{$key};
     
     if (! $step && $ENV{PATH_INFO} && $ENV{PATH_INFO} =~ m|^/(\w+)|) {
       $step = lc($1);
@@ -170,7 +175,14 @@ sub path {
     ### if no step don't do anything
     $step ? [$step] : []; # return of the do
   };
-  }
+}
+
+### really should only be used during initialization
+sub set_path {
+  my $self = shift;
+  my $path = $self->{path} ||= [];
+  splice @$path, 0, $#$path + 1, @_; # change entries in the ref
+}
 
 sub add_to_path {
   my $self = shift;
@@ -222,7 +234,7 @@ sub run_hook {
 sub handle_error {
   my $self = shift;
   my $err  = shift;
-  dex $err, $self->{history};
+  debug $err, $self->{history};
 }
 
 ###----------------------------------------------------------------###
@@ -232,30 +244,86 @@ sub morph {}
 
 sub unmorph {}
 
-###----------------------------------------------------------------###
-### implementation specific subs
-
-sub cgix {
-  return shift()->{cgix} ||= do {
-    require CGI::Ex;
-    CGI::Ex->new(); # return of the do
-  };
+sub add_property {
+  my $self = shift;
+  my $prop = shift;
+  no strict 'refs';
+  my $name = __PACKAGE__ ."::". $prop;
+  *$name = sub : lvalue {
+    my $self = shift;
+    $self->{$prop} = shift() if $#_ != -1;
+    $self->{$prop};
+  } if ! defined &$name;
+  $self->$prop(shift()) if $#_ != -1;
 }
+
+###----------------------------------------------------------------###
+### a few standard base accessors
 
 sub form {
   my $self = shift;
-  if ($#_ != -1) { ### allow for setting of form
-    return $self->{form} = shift;
+  if ($#_ != -1) {
+    $self->{form} = shift || die "Invalid form";
   }
   return $self->{form} ||= $self->cgix->get_form;
 }
 
-sub vob {
-  return shift()->{vob} ||= do {
-    require CGI::Ex::Validate;
-    CGI::Ex::Validate->new; # return of the do
+sub cookies {
+  my $self = shift;
+  if ($#_ != -1) {
+    $self->{cookies} = shift || die "Invalid cookies";
+  }
+  return $self->{cookies} ||= $self->cgix->get_cookies;
+}
+
+sub cgix {
+  my $self = shift;
+  return $self->{cgix} ||= do {
+    my $args = shift || {};
+    require CGI::Ex;
+    CGI::Ex->new($args); # return of the do
   };
 }
+
+sub set_cgix {
+  my $self = shift;
+  $self->{cgix} = shift;
+}
+
+sub vob {
+  my $self = shift;
+  return $self->{vob} ||= do {
+    my $args = shift || {};
+    $args->{cgix} ||= $self->cgix;
+    require CGI::Ex::Validate;
+    CGI::Ex::Validate->new($args); # return of the do
+  };
+}
+
+sub set_vob {
+  my $self = shift;
+  $self->{vob} = shift;
+}
+
+sub auth {
+  my $self = shift;
+  return $self->{auth} ||= do {
+    my $args = shift || {};
+    $args->{cgix}    ||= $self->cgix,
+    $args->{form}    ||= $self->form,
+    $args->{cookies} ||= $self->cookies,
+    require CGI::Ex::Auth;
+    CGI::Ex::Auth->new($args); # return of the do
+  };
+}
+
+sub set_auth {
+  my $self = shift;
+  $self->{auth} = shift;
+}
+
+###----------------------------------------------------------------###
+### implementation specific subs
 
 sub print {
   my $self = shift;
@@ -271,7 +339,27 @@ sub print {
 
 sub base_dir_rel {
   my $self = shift;
+  $self->{base_dir_rel} = shift if $#_ != -1;
   return $self->{base_dir_rel} ||= $BASE_DIR_REL;
+}
+
+sub base_dir_abs {
+  my $self = shift;
+  $self->{base_dir_abs} = shift if $#_ != -1;
+  return $self->{base_dir_abs} || $BASE_DIR_ABS
+    || die "\$BASE_DIR_ABS not set for use in stub functions";
+}
+
+sub ext_val {
+  my $self = shift;
+  $self->{ext_val} = shift if $#_ != -1;
+  return $self->{ext_val} || $EXT_VAL || die "\$EXT_VAL not set for use in stub functions";
+}
+
+sub ext_print {
+  my $self = shift;
+  $self->{ext_print} = shift if $#_ != -1;
+  return $self->{ext_print} || $EXT_PRINT || die "\$EXT_PRINT not set for use in stub functions";
 }
 
 sub has_errors {
@@ -318,7 +406,7 @@ sub file_print {
   my $base_dir_rel = $self->base_dir_rel;
   my $module       = $self->run_hook($step, 'name_module');
   my $_step        = $self->run_hook($step, 'name_step', $step);
-  my $ext          = $self->{file_print_ext} || $EXT_PRINT;
+  my $ext          = $self->ext_print;
 
   return "$base_dir_rel/$module/$_step.$ext";
 }
@@ -330,18 +418,16 @@ sub file_val {
   my $base_dir = $self->base_dir_rel;
   my $module   = $self->run_hook($step, 'name_module');
   my $_step    = $self->run_hook($step, 'name_step', $step);
-  my $ext      = $self->{file_val_ext} || $EXT_VAL;
+  my $ext      = $self->ext_val;
 
   ### get absolute if necessary
-  $base_dir = do {
-    $BASE_DIR_ABS ||= do {
-      die "BASE_DIR_ABS not set for use in stub functions";
-    };
-    "$BASE_DIR_ABS/$base_dir";
-  } if $base_dir !~ m|^/|;
+  if ($base_dir !~ m|^/|) {
+    $base_dir = $self->base_dir_abs . "/$base_dir";
+  }
   
   return "$base_dir/$module/$_step.$ext";
 }
+
 
 sub info_complete {
   my $self = shift;
@@ -396,6 +482,11 @@ sub hash_validation {
   my $file = $self->run_hook($step, 'file_val');
   require CGI::Ex::Validate;
   return CGI::Ex::Validate->new->get_validation($file);
+}
+
+sub hash_common {
+  my $self = shift;
+  return $self->{hash_common} ||= {};
 }
 
 sub hash_errors {
@@ -540,7 +631,8 @@ CGI::Ex::Validate::get_validation.
 =item Hook C<-E<gt>file_val>
 
 Returns a filename containing the validation.  Adds method base_dir_rel to hook name_module,
-and name_step and adds on the default file extension found in $EXT_VAL.  File
+and name_step and adds on the default file extension found in $self->ext_val which defaults
+to the global $EXT_VAL (the property $self->{ext_val} may also be set).  File
 should be readible by CGI::Ex::Validate::get_validation.
 
 =item Hook C<-E<gt>hash_form>
@@ -569,7 +661,8 @@ A hash of common items to be merged with hash_form - such as pulldown menues.
 =item Hook C<-E<gt>file_print>
 
 Returns a filename of the content to be used in the default print hook.  Adds method base_dir_rel to
-hook name_module, and name_step and adds on the default file extension found in $EXT_PRINT.
+hook name_module, and name_step and adds on the default file extension found in $self->ext_print
+which defaults to the global $EXT_PRINT (the property $self->{ext_print} may also be set).
 Should be a file that can be handled by hook print.
 
 =item Hook C<-E<gt>print>
@@ -577,9 +670,10 @@ Should be a file that can be handled by hook print.
 Take the information and print it out.  Default incarnation uses Template.  Arguments
 are: step name, form hashref, and fill hashref.
 
-=item Hook C<-E<gt>post_hook>
+=item Hook C<-E<gt>post_print>
 
-A hook which occurs after the printing has taken place.  Is only run if the information was not complete.  Useful for printing rows of a database query.
+A hook which occurs after the printing has taken place.  Is only run if the information
+was not complete.  Useful for printing rows of a database query.
 
 =item Hook C<-E<gt>post_step>
 

@@ -328,4 +328,51 @@ $e = &validate({foo => '209.108.25'}, $v);
 $e = &validate({foo => '209.108.25.111'}, $v);
 &print_ok(! $e);
 
+### min_in_set checks
+$v = {foo => {min_in_set => '2 of foo bar baz', max_values => 5}};
+$e = &validate({foo => 1}, $v);
+&print_ok($e);
+$e = &validate({foo => 1, bar => 1}, $v);
+&print_ok(! $e);
+$e = &validate({foo => 1, bar => ''}, $v); # empty string doesn't count as value
+&print_ok($e);
+$e = &validate({foo => 1, bar => 0}, $v);
+&print_ok(! $e);
+$e = &validate({foo => [1, 2]}, $v);
+&print_ok(! $e);
+$e = &validate({foo => [1]}, $v);
+&print_ok($e);
+$v = {foo => {min_in_set => '2 foo bar baz', max_values => 5}};
+$e = &validate({foo => 1, bar => 1}, $v);
+&print_ok(! $e);
+
+### max_in_set checks
+$v = {foo => {max_in_set => '2 of foo bar baz', max_values => 5}};
+$e = &validate({foo => 1}, $v);
+&print_ok(! $e);
+$e = &validate({foo => 1, bar => 1}, $v);
+&print_ok(! $e);
+$e = &validate({foo => 1, bar => 1, baz => 1}, $v);
+&print_ok($e);
+$e = &validate({foo => [1, 2]}, $v);
+&print_ok(! $e);
+$e = &validate({foo => [1, 2, 3]}, $v);
+&print_ok($e);
+
+### validate_if revisited (but negated - uses max_in_set)
+$v = {foo => {required => 1, validate_if => '! bar'}};
+$e = &validate({}, $v);
+&print_ok($e);
+
+$e = &validate({bar => 1}, $v);
+&print_ok(! $e);
+
+### default value
+my $f = {};
+$v = {foo => {required => 1, default => 'hmmmm'}};
+$e = &validate($f, $v);
+&print_ok(! $e);
+
+&print_ok($f->{foo} && $f->{foo} eq 'hmmmm');
+
 __DATA__
