@@ -21,7 +21,7 @@ use vars qw($VERSION
             @UNSUPPORTED_BROWSERS
             );
 
-$VERSION = '1.12';
+$VERSION = '1.13';
 
 $ERROR_PACKAGE = 'CGI::Ex::Validate::Error';
 $DEFAULT_EXT   = 'val';
@@ -98,20 +98,24 @@ sub validate {
     next if $validate_if && ! $self->check_conditional($form, $validate_if);
     push @USED_GROUPS, $group_val;
 
-    ### if the validation items were not passed as an arrayref
-    ### look for a group order and then fail back to the keys of the group
+    ### If the validation items were not passed as an arrayref.
+    ### Look for a group order and then fail back to the keys of the group.
+    ### We will keep track of what was added using %found - the keys will
+    ###   be the hash signatures of the field_val hashes (ignore the hash internals).
     my @order  = sort keys %$group_val;
     my $fields = $group_val->{'group fields'};
-    if ($fields) {
+    my %found = (); # attempt to keep track of what field_vals have been added
+    if ($fields) { # if I passed group fields array - use it
       die "'group fields' must be an arrayref" if ! UNIVERSAL::isa($fields,'ARRAY');
-    } else {
+    } else { # other wise - create our own array
       my @fields = ();
       if (my $order = $group_val->{'group order'} || \@order) {
         die "Validation 'group order' must be an arrayref" if ! UNIVERSAL::isa($order,'ARRAY');
         foreach my $field (@$order) {
-          next if $field =~ /^(group|general)\s/; 
+          next if $field =~ /^(group|general)\s/;
           my $field_val = exists($group_val->{$field}) ? $group_val->{$field}
             : ($field eq 'OR') ? 'OR' : die "No element found in group for $field";
+          $found{"$field_val"} = 1; # do this before modifying on the next line
           if (ref $field_val && ! $field_val->{'field'}) {
             $field_val = { %$field_val, 'field' => $field }; # copy the values to add the key
           }
@@ -121,24 +125,24 @@ sub validate {
       $fields = \@fields;
     }
 
-    ### check which fields have been used
-    my %found = ();
+    ### double check which field_vals have been used so far
     foreach my $field_val (@$fields) {
       my $field = $field_val->{'field'} || die "Missing field key in validation";
-      #die "Duplicate order found for $field in group order or fields" if $found{$field};
-      $found{$field} = 1;
+      $found{"$field_val"} = 1;
     }
 
-    ### add any remaining fields from the order
+    ### add any remaining field_vals from the order
+    ### this is necessary for items that weren't in group fields or group order
     foreach my $field (@order) {
-      next if $found{$field};
       next if $field =~ /^(group|general)\s/;
       my $field_val = $group_val->{$field};
       die "Found a nonhashref value on field $field" if ! UNIVERSAL::isa($field_val, 'HASH');
+      next if $found{"$field_val"}; # do before modifying ref on next line
       $field_val = { %$field_val, 'field' => $field } if ! $field_val->{'field'}; # copy the values
       push @$fields, $field_val;
     }
 
+    ### Finally we have our arrayref of hashrefs that each have their 'field' key
     ### now lets do the validation
     my $found  = 1;
     my @errors = ();
@@ -152,7 +156,11 @@ sub validate {
       }
       $found = 1;
       die "Missing field key during normal validation" if ! $ref->{'field'};
+      local $ref->{'was_validated'} = 1;
       my @err = $self->validate_buddy($form, $ref->{'field'}, $ref);
+      if (delete($ref->{'was_validated'}) && $what_was_validated) {
+        push @$what_was_validated, $ref;
+      }
 
       ### test the error - if errors occur allow for OR - if OR fails use errors from first fail
       if (scalar @err) {
@@ -165,7 +173,6 @@ sub validate {
       } else {
         $hold_error = undef;
       }
-      push(@$what_was_validated, $ref) if $what_was_validated;
     }
     push(@errors, @$hold_error) if $hold_error; # allow for final OR to work
 
@@ -272,6 +279,7 @@ sub validate_buddy {
 
   ### allow for not running some tests in the cgi
   if (scalar $self->filter_type('exclude_cgi',$types)) {
+    delete $field_val->{'was_validated'};
     return wantarray ? @errors : scalar @errors;
   }
 
@@ -372,6 +380,7 @@ sub validate_buddy {
     $needs_val ++ if $ret;
   }
   if (! $needs_val && $n_vif) {
+    delete $field_val->{'was_validated'};
     return wantarray ? @errors : scalar @errors;
   }
 
@@ -1073,7 +1082,7 @@ __END__
 
 CGI::Ex::Validate - Yet another form validator - does good javascript too
 
-$Id: Validate.pm,v 1.70 2004/11/10 20:50:39 pauls Exp $
+$Id: Validate.pm,v 1.74 2004/11/12 19:58:57 pauls Exp $
 
 =head1 SYNOPSIS
 
@@ -1200,7 +1209,8 @@ an optional what_was_validated arrayref.
 If a CGI object is passed, CGI::Ex::get_form will be called on that object
 to turn it into a hashref.  If a filename is given for the validation, get_validation
 will be called on that filename.  If the what_was_validated_arrayref is passed - it
-will be populated (pushed) with the field hashes that were actually validated.
+will be populated (pushed) with the field hashes that were actually validated (anything
+that was skipped because of validate_if will not be in the array).
 
 If the form passes validation, validate will return undef.  If it fails validation, it
 will return a CGI::Ex::Validate::Error object.  If the 'raise_error' general option

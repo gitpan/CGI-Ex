@@ -24,7 +24,7 @@ use vars qw($VERSION
             );
 use base qw(Exporter);
 
-$VERSION               = '1.12';
+$VERSION               = '1.13';
 $PREFERRED_FILL_MODULE ||= '';
 $PREFERRED_CGI_MODULE  ||= 'CGI';
 $PREFERRED_VAL_MODULE  ||= '';
@@ -600,15 +600,24 @@ __END__
 
 =head1 NAME
 
-CGI::Ex - Yet Another Form Utility
+CGI::Ex - Yet Another CGI suite (well - ok not "just" another)
 
 =head1 SYNOPSIS
 
-  ### CGI Module Extensions
+  ### CGI::Ex::App example
+  use base qw(CGI::Ex::App);
+  sub main_print { print "Hello world" }
+  __PACKAGE__navigate;
+  exit;
+    # CGI::Ex::App uses just about all of the functionality of
+    # the CGI::Ex suite.  A reading of the CGI::Ex::App perldoc
+    # is suggested.
+
+  ### CGI::Ex Module Extensions
 
   my $cgix = CGI::Ex->new;
   my $hashref = $cgix->get_form; # uses CGI by default
-  
+
   ### send the Content-type header - whether or not we are mod_perl
   $cgix->print_content_type;
 
@@ -685,14 +694,21 @@ CGI::Ex - Yet Another Form Utility
 
 =head1 DESCRIPTION
 
-CGI::Ex is another form filler / validator / conf reader / template
-interface.  Its goal is to take the wide scope of validators and other
-useful CGI application modules out there and merge them into one
-utility that has all of the necessary features of them all, as well
-as several extended methods that I have found useful in working on the web.
+CGI::Ex is another form filler / validator / conf reader / template /
+application builder interface.  Its goal is to take the wide scope of
+validators and other useful CGI application modules out there and
+merge them into one utility that has all of the necessary features of
+them all, as well as several extended methods that I have found useful
+in working on the web.
 
 The main functionality is provided by several other modules that
 may be used separately, or together through the CGI::Ex interface.
+
+Possibly the most useful module is CGI::Ex::App which merges most of
+this functionality together and allows for easy CGI building out
+of the box.  Really, it seems that all of the modules included with
+CGI::Ex, and all of their features, are fully exploited by using
+CGI::Ex::App.
 
 =over 4
 
@@ -726,6 +742,8 @@ it does more of the common tasks for you.
 =back
 
 =head1 METHODS
+
+The following methods are provided by the CGI::Ex object:
 
 =over 4
 
@@ -974,25 +992,6 @@ templates that were being swapped by CGI::Ex::swap_template should
 be compatible with Template::Toolkit.
 
 =back
-
-=head1 EXISTING MODULES
-
-The following is a list of existing validator and formfiller modules
-at the time of this writing (I'm sure this probably isn't exaustive).
-
-=over 4
-
-=item C<Email::Valid> - Validator
-
-=item C<SSN::Validate> - Validator
-
-=item C<Embperl::Form::Validate> - Validator
-
-=item C<Data::CGIForm> - Validator
-
-=item C<HTML::FillInForm> - Form filler-iner
-
-=item C<CGI> - CGI Getter.  Form filler-iner
 
 =head1 TODO
 

@@ -13,9 +13,10 @@ package CGI::Ex::App;
 use strict;
 use vars qw($VERSION
             $EXT_PRINT $EXT_VAL $BASE_DIR_REL $BASE_DIR_ABS $BASE_NAME_MODULE
+            $RECURSE_LIMIT
             %CLEANUP_EXCLUDE);
 
-$VERSION = '1.12';
+$VERSION = '1.13';
 use CGI::Ex::Dump qw(debug);
 
 BEGIN {
@@ -43,7 +44,6 @@ BEGIN {
   ### a nested structure of rules - which are somehow
   ### referenced in other places
   $CLEANUP_EXCLUDE{'Template::Parser'} = 1;
-
 }
 
 
@@ -68,138 +68,227 @@ sub navigate {
 
   eval {
 
-    ### keep from an infinate nesting
-    local $self->{recurse} = $self->{recurse} || 0;
-    die "Too much recursion ($self->{recurse})" if $self->{recurse} ++ >= 5;
+    ### a chance to do things at the very beginning
+    return $self if $self->pre_navigate;
 
-    ### allow for passing a path to navigate
-    if ($args->{path}) {
-      $self->insert_path(@{ $args->{path} });
+    ### run the step loop
+    eval { $self->nav_loop };
+    if ($@) {
+      ### rethrow the error unless we long jumped out of recursive nav_loop calls
+      die $@ if $@ ne "Long Jump\n";
     }
 
-    ### get the path (simple array based thing)
-    my $path = $self->path;
+    ### one chance to do things at the very end
+    $self->post_navigate;
 
-    ### allow for a hook
-    if ($self->pre_loop($path)) {
-      ### a true value means to abort the navigate
-      return $self;
-    }
+  };
 
-    ### get a hash of valid paths (if any)
-    my $valid_steps = $self->valid_steps;
-
-    ### iterate on each step of the path
-    foreach ($self->{path_i} ||= 0;
-             $self->{path_i} <= $#$path;
-             $self->{path_i} ++) {
-      my $step = $path->[$self->{path_i}];
-      next if $step !~ /^\w+$/; # don't process the step if it contains odd characters
-
-      ### check if this is an allowed step
-      if ($valid_steps) {
-        if (! $valid_steps->{$step}
-            && $step ne $self->default_step
-            && $step ne 'forbidden') {
-          $self->stash->{'forbidden_step'} = $step;
-          $self->replace_path('forbidden');
-          next;
-        }
-      }
-
-      ### allow for putting some steps in external files
-      $self->morph($step);
-
-      ### if the pre_step exists and returns true, return from navigate
-      if ($self->run_hook($step, 'pre_step')) {
-        $self->unmorph($step);
-        return $self;
-      }
-
-      ### see if we have complete valid information for this step
-      ### if so, do the next step
-      ### if not, get necessary info and print it out
-      if (   ! $self->run_hook($step, 'prepare', 1)
-          || ! $self->run_hook($step, 'info_complete')
-          || ! $self->run_hook($step, 'finalize', 1)) {
-        my $hash_form = $self->run_hook($step, 'hash_form');
-        my $hash_fill = $self->run_hook($step, 'hash_fill');
-        my $hash_errs = $self->run_hook($step, 'hash_errors');
-        my $hash_comm = $self->run_hook($step, 'hash_common');
-
-        ### fix up errors
-        $hash_errs->{$_} = $self->format_error($hash_errs->{$_})
-          foreach keys %$hash_errs;
-        $hash_errs->{has_errors} = 1 if scalar keys %$hash_errs;
-
-        ### compose $fill of fill and form
-        my $fill = {};
-        foreach my $hash ($hash_fill, $hash_form) {
-          foreach my $key (keys %$hash) {
-            $fill->{$key} = $hash->{$key} if ! exists $fill->{$key};
-          }
-        }
-
-        ### compose $form of form, common, and errors
-        my $form = {};
-        foreach my $hash ($hash_form, $hash_comm, $hash_errs) {
-          foreach my $key (keys %$hash) {
-            $form->{$key} = $hash->{$key} if ! exists $form->{$key};
-          }
-        }
-
-        ### run the print hook - passing it the form and fill info
-        $self->run_hook($step, 'print', undef,
-                        $form, $fill);
-
-        ### a hook after the printing process
-        $self->run_hook($step, 'post_print');
-
-        $self->unmorph($step);
-
-        return $self;
-      }
-
-      ### a hook before end of loop
-      ### if the post_step exists and returns true, return from navigate
-      if ($self->run_hook($step, 'post_step')) {
-        $self->unmorph($step);
-        return $self;
-      }
-
-      $self->unmorph($step);
-    }
-
-    ### allow for one more hook after the loop
-    if ($self->post_loop($path)) {
-      ### a true value means to abort the navigate
-      return $self;
-    }
-
-    ### run the main step as a last resort
-    $self->navigate({path => [$self->default_step]});
-    return $self;
-
-  }; # end of eval
-
-  ### catch errors if any
+  ### catch errors - if any
   if ($@) {
-    if ($self->{recurse} == 1) {
-      if (my $meth = $self->can('handle_error')) {
-        $self->$meth("$@");
-        return $self;
-      }
-    }
-    die $@;
+    $self->handle_error($@);
   }
 
   return $self;
+}
+
+sub nav_loop {
+  my $self = shift;
+
+  ### keep from an infinate nesting
+  local $self->{recurse} = $self->{recurse} || 0;
+  if ($self->{recurse} ++ >= $self->recurse_limit) {
+    my $err = "recurse_limit reached (".$self->recurse_limit.")";
+    $err .= " number of jumps (".$self->{jumps}.")" if ($self->{jumps} || 0) > 1;
+    die $err;
+  }
+
+  ### get the path (simple arrayref based thing)
+  my $path = $self->path;
+
+  ### allow for an early return
+  return if $self->pre_loop($path); # a true value means to abort the navigate
+
+  ### get a hash of valid paths (if any)
+  my $valid_steps = $self->valid_steps;
+
+  ### iterate on each step of the path
+  foreach ($self->{path_i} ||= 0;
+           $self->{path_i} <= $#$path;
+           $self->{path_i} ++) {
+    my $step = $path->[$self->{path_i}];
+    next if $step !~ /^[a-zA-Z_]\w*$/; # don't process the step if it contains odd characters
+
+    ### check if this is an allowed step
+    if ($valid_steps) {
+      if (! $valid_steps->{$step}
+          && $step ne $self->default_step
+          && $step ne 'forbidden') {
+        $self->stash->{'forbidden_step'} = $step;
+        $self->replace_path('forbidden');
+        next;
+      }
+    }
+
+    ### allow for becoming another package (allows for some steps in external files)
+    $self->morph($step);
+
+    ### run the guts of the step
+    my $status = $self->run_hook($step, 'run_step');
+
+    $self->unmorph($step);
+
+    ### Allow for the run_step to intercept.
+    ### A true status means the run_step took over navigation.
+    return if $status;
+  }
+
+  ### allow for one exit point after the loop
+  return if $self->post_loop($path); # a true value means to abort the navigate
+
+  ### run the default step as a last resort
+  $self->insert_path($self->default_step);
+  $self->nav_loop; # go recursive
+
+  return;
+}
+
+sub pre_navigate {}
+
+sub post_navigate {}
+
+sub recurse_limit { shift->{'recurse_limit'} || $RECURSE_LIMIT || 15 }
+
+sub run_step {
+  my $self = shift;
+  my $step = shift;
+
+  ### if the pre_step exists and returns true, exit the nav_loop
+  return 1 if $self->run_hook($step, 'pre_step');
+
+  ### allow for skipping this step (but stay in the nav_loop)
+  return 0 if $self->run_hook($step, 'skip');
+
+  ### see if we have complete valid information for this step
+  ### if so, do the next step
+  ### if not, get necessary info and print it out
+  if (   ! $self->run_hook($step, 'prepare', 1)
+      || ! $self->run_hook($step, 'info_complete')
+      || ! $self->run_hook($step, 'finalize', 1)) {
+
+    ### show the page requesting the information
+    $self->run_hook($step, 'prepared_print');
+
+    ### a hook after the printing process
+    $self->run_hook($step, 'post_print');
+
+    return 2;
+  }
+
+  ### a hook before end of loop
+  ### if the post_step exists and returns true, exit the nav_loop
+  return 1 if $self->run_hook($step, 'post_step');
+
+  ### let the nav_loop continue searching the path
+  return 0;
+}
+
+### standard functions for printing - gather information
+sub prepared_print {
+  my $self = shift;
+  my $step = shift;
+
+  my $hash_form = $self->run_hook($step, 'hash_form');
+  my $hash_fill = $self->run_hook($step, 'hash_fill');
+  my $hash_errs = $self->run_hook($step, 'hash_errors');
+  my $hash_comm = $self->run_hook($step, 'hash_common');
+
+  ### fix up errors
+  $hash_errs->{$_} = $self->format_error($hash_errs->{$_})
+    foreach keys %$hash_errs;
+  $hash_errs->{has_errors} = 1 if scalar keys %$hash_errs;
+
+  ### layer hashes together (micro-optimized)
+  my $form = {%$hash_comm, %$hash_errs, %$hash_form};
+  my $fill = {%$hash_comm, %$hash_form, %$hash_fill};
+
+  ### run the print hook - passing it the form and fill info
+  $self->run_hook($step, 'print', undef,
+                  $form, $fill);
+}
+
+sub exit_nav_loop {
+  my $self = shift;
+
+  ### undo morphs
+  if (my $ref = $self->{'_morph_lineage'}) {
+    $self->unmorph while $#$ref != -1;
+  }
+
+  ### long jump back
+  die "Long Jump\n";
+}
+
+sub jump {
+  my $self   = shift;
+  my $i      = ($#_ == -1) ? 1 : shift;
+  my $path   = $self->path;
+  my $path_i = $self->{path_i};
+  die "Can't jump if nav_loop not started" if ! defined $path_i;
+
+  ### validate where we are jumping to
+  if ($i =~ /^\w+$/) {
+    if ($i eq 'FIRST') {
+      $i = - $path_i - 1;
+    } elsif ($i eq 'LAST') {
+      $i = $#$path - $path_i;
+    } elsif ($i eq 'NEXT') {
+      $i = 1;
+    } elsif ($i eq 'CURRENT') {
+      $i = 0;
+    } elsif ($i eq 'PREVIOUS') {
+      $i = -1;
+    } else { # look for a step by that name
+      for (my $j = $#$path; $j >= 0; $j --) {
+        if ($path->[$j] eq $i) {
+          $i = $j - $path_i;
+          last;
+        }
+      }
+    }
+  }
+  if ($i !~ /^-?\d+$/) {
+    Carp::croak("Invalid jump index ($i)") if eval {require Carp};
+    die "Invalid jump index ($i)";
+  }
+
+  ### manipulate the path to contain the new jump location
+  my @replace;
+  my $cut_i  = $path_i + $i;
+  if ($cut_i > $#$path) {
+    push @replace, $self->default_step;
+  } elsif ($cut_i < 0) {
+    push @replace, @$path;
+  } else {
+    push @replace, @$path[$cut_i .. $#$path];
+  }
+  $self->replace_path(@replace);
+
+  ### record the number of jumps
+  $self->{jumps} ||= 0;
+  $self->{jumps} ++;
+
+  ### run the newly fixed up path (recursively)
+  $self->{path_i} ++; # move along now that the path is updated
+  $self->nav_loop;
+  $self->exit_nav_loop;
 }
 
 sub default_step {
   my $self = shift;
   return $self->{'default_step'} || 'main';
 }
+
+###----------------------------------------------------------------###
 
 sub step_key {
   my $self = shift;
@@ -215,7 +304,7 @@ sub path {
 
     if (my $step = $self->form->{$step_key}) {
       push @path, $step;
-    } elsif ($ENV{PATH_INFO} && $ENV{PATH_INFO} =~ m|^/(\w+)|) {
+    } elsif ($ENV{'PATH_INFO'} && $ENV{'PATH_INFO'} =~ m|^/(\w+)|) {
       push @path, lc($1);
     }
 
@@ -271,6 +360,7 @@ sub insert_path {
 sub valid_steps {}
 
 ###----------------------------------------------------------------###
+### allow for checking where we are in the path
 
 sub step_by_path_index {
   my $self = shift;
@@ -283,17 +373,32 @@ sub step_by_path_index {
 
 sub previous_step {
   my $self = shift;
+  die "previous_step is readonly" if $#_ != -1;
   return $self->step_by_path_index( ($self->{path_i} || 0) - 1 );
 }
 
 sub current_step {
   my $self = shift;
+  die "current_step is readonly" if $#_ != -1;
   return $self->step_by_path_index( ($self->{path_i} || 0) );
 }
 
 sub next_step {
   my $self = shift;
+  die "next_step is readonly" if $#_ != -1;
   return $self->step_by_path_index( ($self->{path_i} || 0) + 1 );
+}
+
+sub last_step {
+  my $self = shift;
+  die "last_step is readonly" if $#_ != -1;
+  return $self->step_by_path_index( $#{ $self->path } );
+}
+
+sub first_step {
+  my $self = shift;
+  die "first_step is readonly" if $#_ != -1;
+  return $self->step_by_path_index( 0 );
 }
 
 ###----------------------------------------------------------------###
@@ -307,7 +412,7 @@ sub hook {
   my $step    = shift || '';
   my $hook    = shift || die "Missing hook name";
   my $default = shift;
-  my $hist    = $self->{history} ||= [];
+  my $hist    = $self->history;
   my $code;
   if ($step && ($code = $self->can("${step}_${hook}"))) {
     push @$hist, "$step - $hook - ${step}_${hook}";
@@ -336,11 +441,16 @@ sub run_hook {
   return $self->$code($step, @_);
 }
 
-### default error - just show what happened
+sub history {
+  return shift->{'history'} ||= [];
+}
+
+### default die handler - show what happened and die (so its in the error logs)
 sub handle_error {
   my $self = shift;
   my $err  = shift;
-  debug $err, $self->{history};
+  debug $err, $self->path, $self->history;
+  die $err;
 }
 
 ###----------------------------------------------------------------###
@@ -359,39 +469,47 @@ sub allow_nested_morph {
 sub morph {
   my $self = shift;
   my $step = shift || return;
-  return if ! $self->allow_morph;
+  return if ! (my $allow = $self->allow_morph); # not true
+  return if ref($allow) && ! $allow->{$step};   # hash - but no step
 
-  ### which package we are blessing into
-  my $new = $self->run_hook($step, 'morph_package');
-  my $cur = ref $self;
-
-  ### store the lineage
-  my $ref = $self->{'_morph_lineage'} ||= [];
+  ### place to store the lineage
+  my $lin = $self->{'_morph_lineage'} ||= [];
+  my $cur = ref $self; # what are we currently
+  push @$lin, $cur;    # store so subsequent unmorph calls can do the right thing
 
   ### make sure we haven't already been reblessed
-  if (! $self->allow_nested_morph && $#$ref != -1) {
-    push @$ref, $cur; # needed so unmorph does the right thing
-    return;
-    # This is also possible if we want to die but it
-    # is much nicer to allow us to morph early
-    #my @old = @$ref;
-    #my $err = "morph calls may not be nested: orig (@old), current ($cur), new ($new)";
-    #debug $err;
-    #die $err;
+  if ($#$lin != 0                                # is this the second morph call
+      && (! ($allow = $self->allow_nested_morph) # not true
+          || (ref($allow) && ! $allow->{$step})  # hash - but no step
+          )) {
+    return; # just return - don't die so that we can morph early
   }
 
-  ### store our lineage
-  push @$ref, $cur;
-
   ### if we are not already that package - bless us there
+  my $hist = $self->history;
+  push @$hist, "$step - morph - morph";
+  my $sref = \$hist->[-1]; # get ref so we can add more info in a moment
+  my $new  = $self->run_hook($step, 'morph_package');
   if ($cur ne $new) {
     my $file = $new .'.pm';
     $file =~ s|::|/|g;
     if (eval { require $file }) { # check for the file that holds this package
       ### become that package
       bless $self, $new;
+      $$sref .= " - changed $cur to $new";
       if (my $method = $self->can('fixup_after_morph')) {
         $self->$method($step);
+      }
+    } else {
+      if ($@) {
+        if ($@ =~ /^\s*(Can\'t locate \S+ in \@INC)/) { # let us know what happened
+          $$sref .= " - failed from $cur to $new: $1";
+        } else {
+          $$sref .= " - failed from $cur to $new: $@";
+          my $err = "Trouble while morphing to $file: $@";
+          debug $err;
+          warn $err;
+        }
       }
     }
   }
@@ -400,17 +518,19 @@ sub morph {
 
 sub unmorph {
   my $self = shift;
-  my $step = shift;
-  my $ref  = $self->{'_morph_lineage'} || return;
+  my $step = shift || '__no_step';
+  my $lin  = $self->{'_morph_lineage'} || return;
   my $cur  = ref $self;
-  my $prev = pop(@$ref) || die "unmorph called more times than morph current ($cur)";
+  my $prev = pop(@$lin) || die "unmorph called more times than morph - current ($cur)";
 
   ### if we are not already that package - bless us there
   if ($cur ne $prev) {
     if (my $method = $self->can('fixup_before_unmorph')) {
       $self->$method($step);
     }
-    bless $self, delete $self->{'_parent_pckg'};
+    bless $self, $prev;
+    my $hist = $self->history;
+    push @$hist, "$step - unmorph - unmorph - changed from $cur to $prev";
   }
 
   return $self;
@@ -580,7 +700,7 @@ sub form_name { 'theform' }
 
 ### provide some rudimentary javascript support
 ### if valid_steps is defined - it should include "js"
-sub js_pre_step {
+sub js_run_step {
   my $self = shift;
 
   ### make sure path info looks like /js/CGI/Ex/foo.js
@@ -588,7 +708,7 @@ sub js_pre_step {
   $file = ($file =~  m!^(?:/js/|/)?(\w+(?:/\w+)*\.js)$!) ? $1 : '';
 
   $self->cgix->print_js($file);
-  return 1;
+  return 1; # intercepted
 }
 
 ###----------------------------------------------------------------###
@@ -769,7 +889,7 @@ sub set_ready_validate {
 sub validate {
   my $self = shift;
   my $step = shift;
-  my $form = $self->form;
+  my $form = shift || $self->form;
   my $hash = $self->run_hook($step, 'hash_validation', {});
   my $what_was_validated = [];
 
@@ -789,10 +909,11 @@ sub validate {
 
   ### allow for the validation to give us some redirection
   my $val;
-  foreach my $ref (@$what_was_validated) {
+  OUTER: foreach my $ref (@$what_was_validated) {
     foreach my $method (qw(append_path replace_path insert_path)) {
       next if ! ($val = $ref->{$method});
       $self->$method(ref $val ? @$val : $val);
+      last OUTER;
     }
   }
 
@@ -895,9 +1016,9 @@ More examples will come with time.  Here are the basics for now.
   use base qw(CGI::Ex::App);
   use CGI::Ex::Dump qw(debug);
 
-  sub valid_paths { return {success => 1, js => 1} }
+  sub valid_steps { return {success => 1, js => 1} }
     # default_step (main) is a valid path
-    # note the inclusion of js step for js_validation
+    # note the inclusion of js step to allow js_validation
 
   # base_dir_abs is only needed if default print is used
   # template toolkit needs an INCLUDE_PATH
@@ -907,17 +1028,19 @@ More examples will come with time.  Here are the basics for now.
     # reference to string means ref to content
     # non-reference means filename
     return \ "<h1>Main Step</h1>
-    <form method=post name=[% form_name %]>
-    <input type=text name=foo>
-    <span style='color:red' id=foo_error>[% foo_error %]</span><br>
-    <input type=submit>
-    </form>
-    [% js_validation %]
-    <a href='[% script_name %]?step=foo'>Link to forbidden step</a>
+      <form method=post name=[% form_name %]>
+      <input type=text name=foo>
+      <span style='color:red' id=foo_error>[% foo_error %]</span><br>
+      <input type=submit>
+      </form>
+      [% js_validation %]
+      <a href='[% script_name %]?step=foo'>Link to forbidden step</a>
     ";
   }
 
-  sub post_print { debug shift->{history} } # show what happened
+  sub post_navigate {
+    debug shift->history;
+  } # show what happened
 
   sub main_file_val {
     # reference to string means ref to yaml document
@@ -967,9 +1090,12 @@ use a system other than Template::Toolkit).
 
 =head1 HOOKS / METHODS
 
-Hooks are basically methods calls that look for a variety of method
-names.  See the discussion under the method named "hook" for more
-details.  Hooks and methods are looked for in the following order:
+CGI::Ex::App works on the principles of hooks which are essentially
+glorified method lookups.  When a hook is called, CGI::Ex::App will
+look for a corresponding method call for that hook for the current
+step name.  See the discussion under the method named "hook" for more
+details.  The methods listed below are normal method calls.
+Hooks and methods are looked for in the following order:
 
 =over 4
 
@@ -982,27 +1108,40 @@ Object creator.  Takes a hash or hashref.
 Called by the default new method.  Allows for any object
 initilizations.
 
-=item Method C<-E<gt>form>
-
-Returns a hashref of the items passed to the CGI.  Returns
-$self->{form}.  Defaults to CGI::Ex::get_form.
-
 =item Method C<-E<gt>navigate>
 
 Takes a class name or a CGI::Ex::App object as arguments.  If a class
 name is given it will instantiate an object by that class.  All returns
 from navigate will return the object.
 
-The method navigate is the main loop runner.  It figures out the path
-and runs all of the appropriate hooks for each step of the path.  Once
-all steps in the path run successfully, it will call it self with a path
-set to [$self->default_step] to allow for a default main path to run.
+The method navigate is essentially a safe wrapper around the ->nav_loop
+method.  It will catch any dies and pass them to ->handle_error.
+
+=item Method C<-E<gt>nav_loop>
+
+This is the main loop runner.  It figures out the current path
+and runs all of the appropriate hooks for each step of the path.  If
+nav_loop runs out of steps to run (which happens if no path is set, or if
+all other steps run successfully), it will insert the ->default_step into
+the path and run nav_loop again (recursively).  This way a step is always
+assured to run.  There is a method ->recurse_limit (default 15) that
+will catch logic errors (such as inadvertently running the same
+step over and over and over).
 
 The basic outline of navigation is as follows (the default actions for hooks
 are shown):
 
   navigate {
+    eval {
+      ->pre_navigate
+      ->nav_loop
+      ->post_navigate
+    }
+    # dying errors will run the ->handle_error method
+  }
 
+
+  nav_loop {
     ->path (get the path steps)
        # DEFAULT ACTION
        # look in $ENV{'PATH_INFO'}
@@ -1024,32 +1163,56 @@ are shown):
         # ->morph_package (hook - get the package to bless into)
         # ->fixup_after_morph if morph_package exists
 
-      ->pre_step (hook)
-        # skips this step if true
+      ->run_step (hook)
 
-      ->prepare (hook - defaults to true)
-
-      ->info_complete (hook - ran if prepare was true)
+      ->unmorph
         # DEFAULT ACTION
-        # ->ready_validate (hook)
-        # return false if ! ready_validate
-        # ->validate (hook)
-        #   ->hash_validation (hook)
-        #     ->file_val (hook - uses base_dir_rel, name_module, name_step, ext_val)
-        #   uses CGI::Ex::Validate to validate the hash
-        # returns true if validate is true
+        # ->fixup_before_unmorph if blessed to previous package
 
-      ->finalize (hook - defaults to true - ran if prepare and info_complete were true)
+      # exit loop if ->run_step returned true (intercepted)
 
-      if ! ->prepare || ! ->info_complete || ! ->finalize {
-        ->hash_form (hook)
-        ->hash_fill (hook)
-        ->hash_errors (hook)
-        ->hash_common (hook)
+    } end of step foreach
 
-        # merge common, errors, and form
+    ->post_loop
+      # navigation stops if true
 
-        ->print (hook - passed current step, merged hash, and fill)
+    ->default_step (inserted into path at current location)
+    ->nav_loop (called again recursively)
+
+  } end of nav_loop
+
+
+  run_step {
+    ->pre_step (hook)
+      # exits nav_loop if true
+
+    ->skip (hook)
+      # skips this step if true (stays in nav_loop)
+
+    ->prepare (hook - defaults to true)
+
+    ->info_complete (hook - ran if prepare was true)
+      # DEFAULT ACTION
+      # ->ready_validate (hook)
+      # return false if ! ready_validate
+      # ->validate (hook)
+      #   ->hash_validation (hook)
+      #     ->file_val (hook - uses base_dir_rel, name_module, name_step, ext_val)
+      #   uses CGI::Ex::Validate to validate the hash
+      # returns true if validate is true
+
+    ->finalize (hook - defaults to true - ran if prepare and info_complete were true)
+
+    if ! ->prepare || ! ->info_complete || ! ->finalize {
+      ->prepared_print
+        # DEFAULT ACTION
+        # ->hash_form (hook)
+        # ->hash_fill (hook)
+        # ->hash_errors (hook)
+        # ->hash_common (hook)
+        # merge common, errors, and form into merged form
+        # merge common, form, and fill into merged fill
+        # ->print (hook - passed current step, merged form hash, and merged fill)
           # DEFAULT ACTION
           # ->file_print (hook - uses base_dir_rel, name_module, name_step, ext_print)
           # ->template_args
@@ -1057,43 +1220,90 @@ are shown):
           # Fills the any forms with CGI::Ex::Fill
           # Prints headers and the content
 
-        ->post_print (hook - used for anything after the print process)
+      ->post_print (hook - used for anything after the print process)
 
-        # return from navigation
-      }
+      # return true to exit from nav_loop
+    }
 
-      ->post_step (hook)
+    ->post_step (hook)
+      # exits nav_loop if true
 
-      ->unmorph (actually called any time the step exits the loop)
-        # DEFAULT ACTION
-        # ->fixup_before_unmorph if blessed to previous package
+  } end of run_step
 
-    } end of step foreach
 
-    ->post_loop
-      # navigation stops if true
+=item Method C<-E<gt>pre_navigate>
 
-    ->default_step
-    ->navigate (passed the new default step)
+Called from within navigate.  Called before the nav_loop method is started.
+If a true value is returned then navigation is skipped (the nav_loop is never
+started).
 
-  } end of navigation
+=item Method C<-E<gt>post_navigate>
 
-  # dying errors will run the ->handle_error method
+Called from within navigate.  Called after the nav_loop has finished running.
+Will only run if there were no errors which died during the nav_loop
+process.
+
+=item Method C<-E<gt>handle_error>
+
+If anything dies during execution, handle_error will be called with
+the error that had happened.  Default is to debug the error and path
+history.
+
+=item Method C<-E<gt>history>
+
+Returns an arrayref of which hooks of which steps of the path were ran.
+Useful for seeing what happened.  In general - each line of the history
+will show the current step, the hook requested, and which hook was
+actually called. (hooks that don't find a method don't add to history)
+
+=item Method C<-E<gt>cgix>
+
+Returns a CGI::Ex object.  The CGI::Ex object is essentially a wrapper
+around CGI.pm and other modules to ease the gateway layer.  Normally
+the CGI::Ex object is used for sending headers and setting cookies
+and also for location bouncing (see the CGI::Ex perldoc for more
+information).  Any object that supports the CGI::Ex interface can
+be returned (primary methods used are get_form and print_content_type).
+
+=item Method C<-E<gt>form>
+
+Returns a hashref of the items passed to the CGI.  Returns
+$self->{'form'}.  Defaults to ->cgix->get_form - which in turn
+defaults to input returned from a standard CGI.pm object.
+Direct access to a CGI.pm object can be found by calling:
+
+  my $cgi = $self->cgix->object;
+
+Common usage is to normally just deal with the hashref returned
+by ->form.
+
+=item Method C<-E<gt>cookies>
+
+Returns a hashref composed of the cookies passed to the server.
+Returns $self->{'cookies'} which defaults to ->cgix->get_cookies which
+defaults to cookies returned from a standard CGI.pm object.  If cookies
+need to be set - they should be done with the CGI::Ex object (which
+uses CGI.pm to set the cookie) as follows:
+
+  $self->cgix->set_cookie({
+    name  => $cookie_name,
+    value => $cookie_value,
+  }); # will correctly call CGI->cookie
 
 =item Method C<-E<gt>path>
 
 Return an arrayref (modifyable) of the steps in the path.  For each
 step the remaining hooks can be run.  Hook methods are looked up and
 ran using the method "run_hook" which uses the method "hook" to lookup
-the hook.  A history of ran hooks is stored in $self->{history}.
-Default will be a single step path looked up in $form->{path} or in
-$ENV{PATH_INFO}.  By default, path will look for $ENV{'PATH_INFO'} or
-the value of the form by the key step_key.  For the best
-functionality, the arrayref returned should be the same reference
-returned for every call to path - this ensures that other methods can
-add to the path (and will most likely break if the arrayref is not the
-same).  If navigation runs out of steps to run, the default step found
-in default_step will be run.
+the hook.  A history of ran hooks is stored in the array ref returned
+by $self->history.  Default will be a single step path looked up in
+$form->{path} or in $ENV{PATH_INFO}.  By default, path will look for
+$ENV{'PATH_INFO'} or the value of the form by the key step_key.  For
+the best functionality, the arrayref returned should be the same
+reference returned for every call to path - this ensures that other
+methods can add to the path (and will most likely break if the
+arrayref is not the same).  If navigation runs out of steps to run,
+the default step found in default_step will be run.
 
 =item Method C<-E<gt>default_step>
 
@@ -1125,6 +1335,67 @@ Replaces the remaining steps (if any) of the current path.
 Arguments are the steps to insert.  Can be called any time.  Inserts
 the new steps at the current path location.
 
+=item Method C<-E<gt>jump>
+
+This method should not normally be used.  It provides for moving to the
+next step at any point during the nav_loop.  It effectively short circuits
+the remaining hooks for the current step.  It does increment the recursion
+counter (which has a limit of ->recurse_limit - default 15).  It is normally
+better to allow the other hooks in the loop to carry on their normal functions
+and avoid jumping.  (Essentially, this hook behaves like a goto method to
+bypass everything else and continue at a different location in the path - there
+are times when it is necessary or useful - but most of the time should be
+avoided)
+
+Jump takes a single argument which is the location in the path to jump
+to.  This argument may be either a step name, the special words
+"FIRST, LAST, CURRENT, PREVIOUS, OR NEXT" or the number of steps to
+jump forward (or backward) in the path.  The default value, 1,
+indicates that CGI::Ex::App should jump to the next step (the default action for
+jump).  A value of 0 would repeat the current step (watch out for
+recursion).  A value of -1 would jump to the previous step.  The
+special value of "LAST" will jump to the last step.  The special value
+of "FIRST" will jump back to the first step.  In each of these cases,
+the path array retured by ->path is modified to allow for the jumping.
+
+  ### goto previous step
+  $self->jump($self->previous_step);
+  $self->jump('PREVIOUS');
+  $self->jump(-1);
+
+  ### goto next step
+  $self->jump($self->next_step);
+  $self->jump('NEXT');
+  $self->jump(1);
+  $self->jump;
+
+  ### goto current step (repeat)
+  $self->jump($self->current_step);
+  $self->jump('CURRENT');
+  $self->jump(0);
+
+  ### goto last step
+  $self->jump($self->last_step);
+  $self->jump('LAST');
+
+  ### goto first step
+  $self->jump($self->first_step);
+  $self->jump('FIRST');
+
+=item Method C<-E<gt>exit_nav_loop>
+
+This method should not normally used.  It allows for a long jump to the
+end of all nav_loops (even if they are recursively nested).  This
+effectively short circuits all remaining hooks for the current and
+remaining steps.  It is used to allow the ->jump functionality.  If the
+application has morphed, it will be unmorphed before returning.
+
+=item Method C<-E<gt>recurse_limit>
+
+Default 15.  Maximum number of times to allow nav_loop to call itself.
+If ->jump is used alot - the recurse_limit will be reached more quickly.
+It is safe to raise this as high as is necessary - so long as it is intentional.
+
 =item Method C<-E<gt>valid_steps>
 
 Returns a hashref of path steps that are allowed.  If step found in
@@ -1135,10 +1406,11 @@ containing the step that was not valid will be placed in the stash.
 Often the valid_steps method does not need to be defined as arbitrary
 method calls are not possible with CGI::Ex::App.
 
-=item Method C<-E<gt>previous_step, -E<gt>current_step, -E<gt>next_step>
+=item Method C<-E<gt>previous_step, -E<gt>current_step, -E<gt>next_step, -E<gt>last_step, -E<gt>first_step>
 
-Return the previous, current, and next step name - useful for figuring
-out where you are in the path.
+Return the previous, current, next, last, and first step name - useful for figuring
+out where you are in the path.  Note that first_step may not be the same
+thing as default_step if the path was overridden.
 
 =item Method C<-E<gt>pre_loop>
 
@@ -1163,26 +1435,32 @@ will be called as method of $self).
   ### will then look  for $self->info_complete;
   ### will then run       $self->$default_passed_sub; # sub {return 0}
 
-=item Method C<-E<gt>handle_error>
+This system is used to allow for multiple steps to be in the same
+file and still allow for moving some steps out to external sub classed
+packages.  If the application has successfully morphed then it is not
+necessary to add the step name to the beginning of the method name as
+the morphed packages method will override the base package (it is still
+OK to use the full method name "${step}_hookname").
 
-If anything dies during execution, handle_error will be called with
-the error that had happened.  Default is to debug the error and path
-history.
+If a hook is found (or a default value is found) then an entry is added
+to the arrayref contained in ->history.
 
 =item Method C<-E<gt>morph>
 
 Allows for temporarily "becoming" another object type for the
 execution of the current step.  This allows for separating some steps
 out into their own packages.  Morph will only run if the method
-allow_morph returns true.  The morph call occurs at the beginning of
-the step loop.  A corresponding unmorph call occurs before the loop is
-exited.  An object can morph several levels deep if allow_nested_morph
-returns true. For example, an object running as Foo::Bar that is
-looping on the step "my_step" that has allow_morph = 1, will do the
-following: call the hook morph_package (which would default to
-returning Foo::Bar::MyStep in this case), translate this to a package
-filename (Foo/Bar/MyStep.pm) and try and require it, if the file can
-be required, the object is blessed into that package.  If that package
+allow_morph returns true.  Additionally if the allow_morph returns a hash
+ref, morph will only run if the step being morphed to is in the hash.
+The morph call occurs at the beginning of the step loop.  A
+corresponding unmorph call occurs before the loop is exited.  An
+object can morph several levels deep if allow_nested_morph returns
+true. For example, an object running as Foo::Bar that is looping on
+the step "my_step" that has allow_morph = 1, will do the following:
+call the hook morph_package (which would default to returning
+Foo::Bar::MyStep in this case), translate this to a package filename
+(Foo/Bar/MyStep.pm) and try and require it, if the file can be
+required, the object is blessed into that package.  If that package
 has a "fixup_after_morph" method, it is called.  The navigate loop
 then continues for the current step.  At any exit point of the loop,
 the unmorph call is made which reblesses the object into the original
@@ -1191,21 +1469,30 @@ package.
 It is possible to call morph earlier on in the program.  An example of
 a useful early use of morph would be as in the following code:
 
-  sub init {
-    my $self = shift;
-    $self->SUPER::init;
+  sub allow_morph { 1 }
 
-    return if ! $ENV{'PATH_INFO'};
-    my $info = ($ENV{'PATH_INFO'} =~ s|^/(\w+)||) ? $1 : return;
-    $self->morph($info);
+  sub pre_navigate {
+    my $self = shift;
+    if ($ENV{'PATH_INFO'} && $ENV{'PATH_INFO'} =~ s|^/(\w+)||) {
+      my $step = $1;
+      $self->morph($step);
+      $ENV{'PATH_INFO'} = "/$step";
+      $self->stash->{'base_morphed'} = 1;
+    }
+    return 0;
+  }
+
+  sub post_navigate {
+    my $self = shift;
+    $self->unmorph if $self->stash->{'base_morphed'};
   }
 
 If this code was in a module Base.pm and the cgi running was cgi/base
 and called:
 
-  Base->navigate->unmorph;
+  Base->navigate;
   # OR - for mod_perl resident programs
-  Base->navigate->unmorph->cleanup;
+  Base->navigate->cleanup;
 
 and you created a sub module that inherited Base.pm called
 Base/Ball.pm -- you could then access it using cgi/base/ball.  You
@@ -1234,12 +1521,15 @@ object type.  Before the object is reblessed the method
 
 Boolean value.  Specifies whether or not morphing is allowed.
 Defaults to the property "allow_morph" if found, otherwise false.
+For more granularity, if true value is a hash, the step being
+morphed to must be in the hash.
 
 =item Method C<-E<gt>allow_nested_morph>
 
 Boolean value.  Specifies whether or not nested morphing is allowed.
 Defaults to the property "allow_nested_morph" if found, otherwise
-false.
+false.  For more granularity, if true value is a hash, the step being
+morphed to must be in the hash.
 
 =item Hook C<-E<gt>morph_package>
 
@@ -1249,11 +1539,26 @@ example, if the current object running is a Foo::Bar object and the
 step running is my_step, then morph_package will return
 Foo::Bar::MyStep.
 
+=item Hook C<-E<gt>run_step>
+
+Runs all of the hooks specific to each step, beginning with pre_step
+and ending with post_step.  Called after ->morph($step) has been
+run.  If this returns true, the nav_loop is exited (meaning the
+run_step hook displayed the information).  If it returns false,
+the nav_loop continues on to run the next step.  This is essentially
+the same thing as a method defined in CGI::Applications ->run_modes.
+
 =item Hook C<-E<gt>pre_step>
 
-Ran at the beginning of the loop before info_compelete is called.  If
-it returns true, execution of navigate is returned and no more steps
-are processed.
+Ran at the beginning of the loop before prepare, info_compelete, and
+finalize are called.  If it returns true, execution of nav_loop is
+returned and no more steps are processed.
+
+=item Hook C<-E<gt>skip>
+
+Ran at the beginning of the loop before prepare, info_compelete, and
+finalize are called.  If it returns true, nav_loop moves on to the
+next step (the current step is skipped).
 
 =item Hook C<-E<gt>prepare>
 
@@ -1287,7 +1592,18 @@ Sets that the validation is ready to validate.  Should set the value
 checked by the hook ready_validate.  The following would complement the
 processing flag above:
 
-  sub set_ready_validate { shift->form->{'processing'} = shift }
+  sub set_ready_validate {
+    my $self = shift;
+    if (shift) {
+      $self->form->{'processing'} = 1;
+    } else {
+      delete $self->form->{'processing'};
+    }
+  }
+
+Note thate for this example the form key "processing" was deleted.  This
+is so that the call to fill in any html forms won't swap in a value of
+zero for form elements named "processing."
 
 =item Hook C<-E<gt>validate>
 
@@ -1327,6 +1643,7 @@ should be readible by CGI::Ex::Validate::get_validation.
 
 =item Hook C<-E<gt>js_validation>
 
+Requires YAML.pm.
 Will return Javascript that is capable of validating the form.  This
 is done using the capabilities of CGI::Ex::Validate.  This will call
 the hook hash_validation which will then be encoded into yaml and
@@ -1351,10 +1668,10 @@ CGI/Ex/validate.js files can be found.  This will default to
 "$ENV{SCRIPT_NAME}/js" if the path method has not been overridden,
 otherwise it will default to "$ENV{SCRIPT_NAME}?step=js&js=" (the
 latter is more friendly with overridden paths).  A default handler for
-the "js" step has been provided in "js_pre_step" (this handler will
+the "js" step has been provided in "js_run_step" (this handler will
 nicely print out the javascript found in the js files which are
 included with this distribution - if valid_steps is defined, it must
-include the step "js" - js_pre_step will work properly with the
+include the step "js" - js_run_step will work properly with the
 default "path" handler.
 
 =item Hook C<-E<gt>hash_form>
@@ -1384,8 +1701,9 @@ default validate was not used.
 =item Hook C<-E<gt>hash_common>
 
 A hash of common items to be merged with hash_form - such as pulldown
-menues.  By default it is empty, but it would be wise to add the
-following to allow for js_validation (if needed):
+menues.  It will now also be merged with hash_fill, so it can contain
+default fillins.  By default it is empty, but it would be wise to add the
+following to allow for js_validation (as needed):
 
   sub hash_common {
     my $self = shift;
@@ -1419,8 +1737,16 @@ also be set).  Should be a file that can be handled by hook print.
 
 =item Hook C<-E<gt>print>
 
-Take the information and print it out.  Default incarnation uses
-Template.  Arguments are: step name, form hashref, and fill hashref.
+Take the information generated by prepared_print, format it, and print it out.
+Default incarnation uses Template::Toolkit.  Arguments are: step name, form hashref,
+and fill hashref.
+
+=item Hook C<-E<gt>prepared_print>
+
+Called when any of prepare, info_complete, or finalize fail.  Prepares
+a form hash and a fill hash to pass to print.  The form hash is primarily
+intended for use by the templating system.  The fill hash is intended
+to be used to fill in any html forms.
 
 =item Hook C<-E<gt>post_print>
 
@@ -1440,19 +1766,20 @@ processed.
 Ran after all of the steps in the loop have been processed (if
 prepare, info_complete, and finalize were true for each of the steps).
 If it returns a true value the navigation loop will be aborted.  If it
-does not return true, navigation continues by then running
-$self->navigate({path => [$self->default_step]}) to fall back to the
-default step.
+does not return true, navigation continues by then inserting the step
+$self->default_step and running $self->nav_loop again (recurses) to
+fall back to the default step.
 
 =item Method C<-E<gt>stash>
 
 Returns a hashref that can store arbitrary user space data without
-clobering the internals of the Application.
+clobering the internals of the application.
 
 =item Method C<-E<gt>add_property>
 
 Takes the property name as an argument.  Creates an accessor that can
-be used to access a new property.  Calling the new accessor with an
+be used to access a new property.  If there were additional arguments
+they will call the new accessor. Calling the new accessor with an
 argument will set the property.  Using the accessor in an assignment
 will also set the property (it is an lvalue).  Calling the accessor in
 any other way will return the value.
@@ -1478,5 +1805,119 @@ Object types to exclude from the cleanup process.  Add any such global
 hashes (or objects with references to the global hashes) there.
 
 =back
+
+=head1 OTHER APPLICATION MODULES
+
+The concepts used in CGI::Ex::App are not novel or unique.  However, they
+are all commonly used and very useful.  All application builders were
+built because somebody observed that there are common runtime phases
+in CGI building.  CGI::Ex::App differs in that it has found more phases
+of building CGIs.
+
+CGI::Ex::App is intended to be sub classed, and sub sub classed, and each step
+can choose to be sub classed or not.  CGI::Ex::App tries to remain simple
+while still providing "more than one way to do it."  It also tries to avoid
+making any sub classes have to call ->SUPER::.
+
+There are certainly other modules for building CGI applications.  The
+following is a short list of other modules and how CGI::Ex::App is
+different.
+
+=over 4
+
+=item C<CGI::Application>
+
+Seemingly the most well know of application builders.
+CGI::Ex::App is different in that it:
+
+  * Uses Template::Toolkit by default
+      CGI::Ex::App can easily use another toolkit by simply
+      overriding the ->print method.
+      CGI::Application uses HTML::Template.
+  * Offers integrated data validation.
+      CGI::Application has had custom addons created that
+      add some of this functionality.  CGI::Ex::App has the benefit
+      that once validation is created,
+  * Allows the user to print at any time (so long as proper headers
+      are sent.  CGI::Application requires data to be pipelined.
+  * Offers hooks into the various phases of each step ("mode" in
+      CGI::Application lingo).  CGI::Application essentially
+      provides ->runmode
+  * Support for easily jumping around in navigation steps.
+  * Support for storing some steps in another package.
+
+CGI::Ex::App and CGI::Application are similar in that they take care
+of handling headers and they allow for calling other "runmodes" from
+within any given runmode.  CGI::Ex::App's ->run_step is essentially
+equivalent to a method call defined in CGI::Application's ->run_modes.
+The ->run method of CGI::Application starts the application in the same
+manner as CGI::Ex::App's ->navigate call.  Many of the hooks around
+CGI::Ex::App's ->run_step call are similar in nature to those provided by
+CGI::Application.
+
+=item C<CGI::Prototype>
+
+There are actually many simularities.  One of the nicest things about
+CGI::Prototype is that it is extremely short (very very short).  The
+->activate starts the application in the same manner as CGI::Ex::App's
+=>navigate call.  Both use Template::Tookit as the default template system.
+CGI::Ex::App is differrent in that it:
+
+  * Offers integrated data validation.
+      CGI::Application has had custom addons created that
+      add some of this functionality.  CGI::Ex::App has the benefit
+      that once validation is created,
+  * Offers more hooks into the various phases of each step.
+  * Support for easily jumping around in navigation steps.
+  * Support for storing some steps in another package.
+
+=item C<CGI::Path>
+
+CGI::Path and CGI::Ex::App are fairly similar in may ways as they
+were created under similar lines of thought.  The primary difference
+in these two is that CGI::Ex::App:
+
+  * Does not provide "automated path following" based on
+      validated key information.  CGI::Path works well for
+      wizard based applications.  CGI::Ex::App assumes that
+      the application will chose it's own path (it works very
+      well in non-linear paths - it also works fine in
+      linear paths but it doesn't provide some of magic that
+      CGI::Path provides).
+  * Does not provide integrated session support.  CGI::Path
+      requires it for path navigation.  CGI::Ex::App assumes that
+      if session support or authentication is needed by an
+      application, a custom Application layer that inherits
+      from CGI::Ex::App will be written to provide this support.
+  * Offers more granularity in the navigation phase.  CGI::Path
+      has successfully been used as a sub class of CGI::Ex::App
+      with limited modifications.
+
+=back
+
+=head1 BUGS
+
+Uses CGI::Ex for header support by default - which means that support
+for mod_perl 2 is limited at this point.
+
+There are a lot of hooks.  Actually this is not a bug.  Some may
+prefer not calling as many hooks - they just need to override
+methods high in the chain and subsequent hooks will not be called.
+
+There is a lot of code.  If the code base for CGI::Ex::App seems large,
+consider that what it does for you would normally be repeated in the
+individual runmodes of other applications - so CGI::Ex::App is a little
+bigger so your application doesn't have to be.
+
+=head1 THANKS
+
+Bizhosting.com - giving a problem that fit basic design patterns.
+Earl Cahill    - pushing the idea of more generic frameworks.
+Adam Erickson  - design feedback, bugfixing, feature suggestions.
+James Lance    - design feedback, bugfixing, feature suggestions.
+
+=head1 AUTHOR
+
+Paul Seamons <cgi_ex@seamons.com>
 
 =cut

@@ -1,12 +1,21 @@
 NAME
-    CGI::Ex - Yet Another Form Utility
+    CGI::Ex - Yet Another CGI suite (well - ok not "just" another)
 
 SYNOPSIS
-      ### CGI Module Extensions
+      ### CGI::Ex::App example
+      use base qw(CGI::Ex::App);
+      sub main_print { print "Hello world" }
+      __PACKAGE__navigate;
+      exit;
+        # CGI::Ex::App uses just about all of the functionality of
+        # the CGI::Ex suite.  A reading of the CGI::Ex::App perldoc
+        # is suggested.
+
+      ### CGI::Ex Module Extensions
 
       my $cgix = CGI::Ex->new;
       my $hashref = $cgix->get_form; # uses CGI by default
-  
+
       ### send the Content-type header - whether or not we are mod_perl
       $cgix->print_content_type;
 
@@ -82,14 +91,20 @@ SYNOPSIS
       my $ref = $cgix->conf_read('settings');
 
 DESCRIPTION
-    CGI::Ex is another form filler / validator / conf reader / template
-    interface. Its goal is to take the wide scope of validators and other
-    useful CGI application modules out there and merge them into one utility
-    that has all of the necessary features of them all, as well as several
-    extended methods that I have found useful in working on the web.
+    CGI::Ex is another form filler / validator / conf reader / template /
+    application builder interface. Its goal is to take the wide scope of
+    validators and other useful CGI application modules out there and merge
+    them into one utility that has all of the necessary features of them
+    all, as well as several extended methods that I have found useful in
+    working on the web.
 
     The main functionality is provided by several other modules that may be
     used separately, or together through the CGI::Ex interface.
+
+    Possibly the most useful module is CGI::Ex::App which merges most of
+    this functionality together and allows for easy CGI building out of the
+    box. Really, it seems that all of the modules included with CGI::Ex, and
+    all of their features, are fully exploited by using CGI::Ex::App.
 
     "CGI::Ex::Fill"
         A regular expression based form filler inner (accessed through
@@ -118,6 +133,8 @@ DESCRIPTION
         CGI::Application - but it does more of the common tasks for you.
 
 METHODS
+    The following methods are provided by the CGI::Ex object:
+
     "->fill"
         fill is used for filling hash or cgi object values into an existing
         html document (it doesn't deal at all with how you got the
@@ -328,38 +345,27 @@ METHODS
         templates that were being swapped by CGI::Ex::swap_template should
         be compatible with Template::Toolkit.
 
-EXISTING MODULES
-    The following is a list of existing validator and formfiller modules at
-    the time of this writing (I'm sure this probably isn't exaustive).
-
-    "Email::Valid" - Validator
-    "SSN::Validate" - Validator
-    "Embperl::Form::Validate" - Validator
-    "Data::CGIForm" - Validator
-    "HTML::FillInForm" - Form filler-iner
-    "CGI" - CGI Getter. Form filler-iner
-
 TODO
-        Allow for mod_perl 2 header support.
+    Allow for mod_perl 2 header support.
 
 MODULES
-        See also CGI::Ex::Fill.
+    See also CGI::Ex::Fill.
 
-        See also CGI::Ex::Validate.
+    See also CGI::Ex::Validate.
 
-        See also CGI::Ex::Conf.
+    See also CGI::Ex::Conf.
 
-        See also CGI::Ex::Dump.
+    See also CGI::Ex::Dump.
 
-        See also CGI::Ex::Die.
+    See also CGI::Ex::Die.
 
-        See also CGI::Ex::App.
+    See also CGI::Ex::App.
 
-        See also CGI::Ex::Auth.
+    See also CGI::Ex::Auth.
 
 AUTHOR
-        Paul Seamons
+    Paul Seamons
 
 LICENSE
-        This module may be distributed under the same terms as Perl itself.
+    This module may be distributed under the same terms as Perl itself.
 

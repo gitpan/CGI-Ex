@@ -15,18 +15,18 @@ my %files = ();
 
 ###----------------------------------------------------------------###
 
-#           Rate  yaml2   yaml    xml    ini g_conf     pl    sto   sto2  yaml3
-#yaml2     159/s     --    -1%   -72%   -80%   -91%   -95%   -98%   -98%  -100%
-#yaml      160/s     1%     --   -72%   -80%   -91%   -95%   -98%   -98%  -100%
-#xml       565/s   255%   253%     --   -28%   -68%   -84%   -93%   -94%  -100%
-#ini       785/s   393%   391%    39%     --   -55%   -78%   -90%   -91%   -99%
-#g_conf   1756/s  1004%   998%   211%   124%     --   -50%   -78%   -80%   -98%
-#pl       3524/s  2115%  2103%   524%   349%   101%     --   -55%   -61%   -97%
-#sto      7838/s  4826%  4799%  1288%   898%   346%   122%     --   -12%   -93%
-#sto2     8924/s  5508%  5477%  1480%  1037%   408%   153%    14%     --   -92%
-#yaml3  113328/s 71115% 70730% 19961% 14336%  6353%  3116%  1346%  1170%     -- #memory
+# [pauls@localhost lib]$ perl ../t/samples/bench_conf_readers.pl
+#         Rate   yaml  yaml2    sto     pl    xml g_conf    ini   sto2
+#yaml    250/s     --    -1%   -14%   -14%   -61%   -77%   -95%   -95%
+#yaml2   254/s     1%     --   -13%   -13%   -60%   -77%   -95%   -95%
+#sto     292/s    17%    15%     --    -0%   -54%   -73%   -94%   -95%
+#pl      292/s    17%    15%     0%     --   -54%   -73%   -94%   -95%
+#xml     636/s   155%   151%   118%   118%     --   -42%   -88%   -88%
+#g_conf 1088/s   335%   329%   273%   272%    71%     --   -79%   -80%
+#ini    5144/s  1958%  1929%  1662%  1660%   708%   373%     --    -3%
+#sto2   5321/s  2029%  1999%  1723%  1721%   736%   389%     3%     --
 
-my $str = '{
+my $str = {
   foo     => {key1 => "bar",   key2 => "ralph"},
   pass    => {key1 => "word",  key2 => "ralph"},
   garbage => {key1 => "can",   key2 => "ralph"},
@@ -40,21 +40,20 @@ my $str = '{
   one6    => {key1 => "val6",  key2 => "ralph"},
   one7    => {key1 => "val7",  key2 => "ralph"},
   one8    => {key1 => "val8",  key2 => "ralph"},
-}';
+};
 
 ###----------------------------------------------------------------###
 
-#           Rate   yaml  yaml2    xml g_conf     pl    sto   sto2  yaml3
-#yaml      431/s     --    -2%   -61%   -91%   -94%   -97%   -98%  -100%
-#yaml2     438/s     2%     --   -60%   -91%   -94%   -97%   -98%  -100%
-#xml      1099/s   155%   151%     --   -78%   -85%   -92%   -94%   -99%
-#g_conf   4990/s  1057%  1038%   354%     --   -33%   -64%   -72%   -96%
-#pl       7492/s  1637%  1609%   582%    50%     --   -46%   -58%   -93%
-#sto     13937/s  3130%  3078%  1169%   179%    86%     --   -22%   -88%
-#sto2    17925/s  4055%  3988%  1532%   259%   139%    29%     --   -84%
-#yaml3  114429/s 26423% 25996% 10316%  2193%  1427%   721%   538%     -- # memory
+#         Rate   yaml  yaml2     pl    sto    xml g_conf   sto2
+#yaml    736/s     --    -3%   -20%   -21%   -62%   -72%   -89%
+#yaml2   755/s     3%     --   -18%   -19%   -61%   -71%   -89%
+#pl      923/s    25%    22%     --    -1%   -53%   -65%   -86%
+#sto     928/s    26%    23%     1%     --   -53%   -65%   -86%
+#xml    1961/s   166%   160%   113%   111%     --   -26%   -71%
+#g_conf 2635/s   258%   249%   185%   184%    34%     --   -61%
+#sto2   6824/s   827%   803%   639%   635%   248%   159%     --
 
-#$str = '{
+#$str = {
 #  foo     => "bar",
 #  pass    => "word",
 #  garbage => "can",
@@ -68,7 +67,7 @@ my $str = '{
 #  one6    => "val6",
 #  one7    => "val7",
 #  one8    => "val8",
-#}';
+#};
 
 ###----------------------------------------------------------------###
 
@@ -77,90 +76,70 @@ my $conf = eval $str;
 my %TESTS = ();
 
 ### do perl
-my $file = tmpnam(). '.pl';
-open OUT, ">$file";
-print OUT $str;
-close OUT;
+my $dir = tmpnam;
+mkdir $dir, 0755;
+my $tmpnam = "$dir/bench";
+my $file = $tmpnam. '.pl';
 $TESTS{pl} = sub {
-  my $hash = $cob->read_ref($file);
+  $cob->write_ref($file, $str);
 };
 $files{pl} = $file;
 
 ### do a generic conf_write
-my $file2 = tmpnam(). '.g_conf';
-&generic_conf_write($file2, $conf);
-local $CGI::Ex::Conf::EXT_READERS{g_conf} = \&generic_conf_read;
+my $file2 = $tmpnam. '.g_conf';
+local $CGI::Ex::Conf::EXT_WRITERS{g_conf} = \&generic_conf_write;
 $TESTS{g_conf} = sub {
-  my $hash = $cob->read_ref($file2);
+  $cob->write_ref($file2, $str);
 };
 $files{g_conf} = $file2;
 
 
 ### load in the rest of the tests that we support
 if (eval {require Storable}) {
-  my $_file = tmpnam(). '.sto';
-  &Storable::store($conf, $_file);
+  my $_file = $tmpnam. '.sto';
   $TESTS{sto} = sub {
-    my $hash = $cob->read_ref($_file);
+    $cob->write_ref($file, $str);
   };
   $files{sto} = $_file;
 }
 
 if (eval {require Storable}) {
-  my $_file = tmpnam(). '.sto2';
-  &Storable::store($conf, $_file);
+  my $_file = $tmpnam. '.sto2';
   $TESTS{sto2} = sub {
-    my $hash = &Storable::retrieve($_file);
+    &Storable::store($str, $_file);
   };
   $files{sto2} = $_file;
 }
 
 if (eval {require YAML}) {
-  my $_file = tmpnam(). '.yaml';
-  &YAML::DumpFile($_file, $conf);
+  my $_file = $tmpnam. '.yaml';
   $TESTS{yaml} = sub {
-    my $hash = $cob->read_ref($_file);
+    $cob->write_ref($_file, $str);
   };
   $files{yaml} = $_file;
 }
 
 if (eval {require YAML}) {
-  my $_file = tmpnam(). '.yaml2';
-  &YAML::DumpFile($_file, $conf);
+  my $_file = $tmpnam. '.yaml2';
   $TESTS{yaml2} = sub {
-    my $hash = &YAML::LoadFile($_file);
+    &YAML::DumpFile($_file, $str);
   };
   $files{yaml2} = $_file;
 }
 
-if (eval {require YAML}) {
-  my $_file = tmpnam(). '.yaml';
-  &YAML::DumpFile($_file, $conf);
-  $cob->preload_files($_file);
-  $TESTS{yaml3} = sub {
-    my $hash = $cob->read_ref($_file);
-  };
-  $files{yaml3} = $_file;
-}
-
 if (eval {require Config::IniHash}) {
-  my $_file = tmpnam(). '.ini';
-  &Config::IniHash::WriteINI($_file, $conf);
+  my $_file = $tmpnam. '.ini';
   $TESTS{ini} = sub {
     local $^W = 0;
-    my $hash = $cob->read_ref($_file);
+    $cob->write_ref($_file, $str);
   };
   $files{ini} = $_file;
 }
 
 if (eval {require XML::Simple}) {
-  my $_file = tmpnam(). '.xml';
-  my $xml = XML::Simple->new->XMLout($conf);
-  open  OUT, ">$_file" || die $!;
-  print OUT $xml;
-  close OUT;
+  my $_file = $tmpnam. '.xml';
   $TESTS{xml} = sub {
-    my $hash = $cob->read_ref($_file);
+    $cob->write_ref($_file, $str);
   };
   $files{xml} = $_file;
 }
@@ -170,10 +149,20 @@ foreach my $key (sort keys %files) {
   print "$key => $files{$key}\n";
 }
 
+foreach my $key (keys %TESTS) {
+  eval { &{ $TESTS{$key} } };
+  if ($@) {
+    warn "Test for $key failed - skipping";
+    delete $TESTS{$key};
+  }
+}
+
+
 cmpthese($n, \%TESTS);
 
 ### comment out this line to inspect files
 unlink $_ foreach values %files;
+rmdir $dir;
 
 ###----------------------------------------------------------------###
 

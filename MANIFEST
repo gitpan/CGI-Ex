@@ -55,11 +55,13 @@ t/2_fill_18_coderef.t
 t/2_fill_19_complex.t
 t/2_fill_20_switcharoo.t
 t/3_conf_00_base.t
+t/3_conf_01_write.t
 t/4_app_00_base.t
 t/5_dump_00_base.t
 t/6_die_00_base.t
 t/samples/bench_cgix_hfif.pl
 t/samples/bench_conf_readers.pl
+t/samples/bench_conf_writers.pl
 t/samples/bench_method_calling.pl
 t/samples/cgi_ex_1.cgi
 t/samples/cgi_ex_2.cgi
