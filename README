@@ -211,13 +211,18 @@ METHODS
         Very similar to CGI->new->Val except that arrays are returned as
         arrays. Not sure why CGI::Val didn't do this anyway.
 
+    "->set_form"
+        Allow for setting a custom form hash. Useful for testing, or other
+        purposes.
+
     "->get_cookies"
         Returns a hash of all cookies.
 
     "->make_form"
         Takes a hash and returns a query_string. A second optional argument
         may contain an arrayref of keys to use from the hash in building the
-        query_string.
+        query_string. First argument is undef, it will use the form stored
+        in itself as the hash.
 
     "->content_type"
         Can be called multiple times during the same session. Will only
@@ -281,16 +286,18 @@ METHODS
         reference to a string. If a string is passed, a copy of that string
         is swapped and returned. If a reference to a string is passed, it is
         modified in place. The second argument is a form, or a CGI object,
-        or a cgiex object, or a coderef. If it is a coderef, it should
-        accept key as its only argument and return the proper value.
+        or a cgiex object, or a coderef (if the second argument is missing,
+        the cgiex object which called the method will be used). If it is a
+        coderef, it should accept key as its only argument and return the
+        proper value.
 
           my $cgix = CGI::Ex->new;
           my $form = {foo  => 'bar',
                       this => {is => {nested => ['wow', 'wee']}}
                      };
 
-          my $str =  $cgix->swap_template("[% foo %]", $form));
-          # $str eq 'bar'
+          my $str =  $cgix->swap_template("<html>[% foo %]<br>[% foo %]</html>", $form));
+          # $str eq '<html>bar<br>bar</html>'
 
           $str = $cgix->swap_template("[% this.is.nested.1 %]", $form));
           # $str eq 'wee'
@@ -298,6 +305,19 @@ METHODS
           $str = "[% this.is.nested.0 %]";
           $cgix->swap_template(\$str, $form);
           # $str eq 'wow'
+
+          # may also be called with only one argument as follows:
+          # assuming $cgix had a query string of ?foo=bar&baz=wow&this=wee
+          $str = "<html>([% foo %]) <br>
+                  ([% baz %]) <br>
+                  ([% this %]) </html>";
+          $cgix->swap_template(\$str);
+          #$str eq "<html>(bar) <br>
+          #        (wow) <br>
+          #        (wee) </html>";
+  
+        For further examples, please see the code contained in
+        t/samples/cgi_ex_* of this distribution.
 
         If at a later date, the developer upgrades to Template::Toolkit, the
         templates that were being swapped by CGI::Ex::swap_template should

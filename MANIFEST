@@ -58,6 +58,8 @@ t/5_dump_00_base.t
 t/6_die_00_base.t
 t/samples/bench_cgix_hfif.pl
 t/samples/bench_conf_readers.pl
+t/samples/cgi_ex_1.cgi
+t/samples/cgi_ex_2.cgi
 t/samples/conf_path_1/apples.pl
 t/samples/conf_path_1/oranges.pl
 t/samples/conf_path_3/apples.pl

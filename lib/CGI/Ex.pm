@@ -24,7 +24,7 @@ use vars qw($VERSION
             );
 use base qw(Exporter);
 
-$VERSION               = '0.98';
+$VERSION               = '0.99';
 $PREFERRED_FILL_MODULE ||= '';
 $PREFERRED_CGI_MODULE  ||= 'CGI';
 $PREFERRED_VAL_MODULE  ||= '';
@@ -78,13 +78,24 @@ sub get_form {
   my $self = shift || __PACKAGE__;
   $self = $self->new if ! ref $self;
 
+  ### allow for custom hash
+  return $self->{form} if $self->{form};
+
+  ### get the info out of the object
   my $obj  = shift || $self->object;
+  my $meth = $obj->can($OBJECT_METHOD);
   my %hash = ();
-  foreach my $key ($obj->param()) {
-    my @val = $obj->param($key);
+  foreach my $key ($obj->$meth()) {
+    my @val = $obj->$meth($key);
     $hash{$key} = ($#val == -1) ? die : ($#val == 0) ? $val[0] : \@val;
   }
   return \%hash;
+}
+
+### allow for a setter
+sub set_form {
+  my $self = shift;
+  $self->{form} = shift || {};
 }
 
 ### like get_form - but a hashref of cookies
@@ -105,7 +116,7 @@ sub get_cookies {
 ### allow for creating a query_string
 sub make_form {
   my $self = shift;
-  my $form = shift;
+  my $form = shift || $self->get_form();
   my $keys = (ref $_[0]) ? {map {$_ => 1} @{ shift() }} : undef;
   my $str = '';
   foreach my $key (sort keys %$form) {
@@ -194,12 +205,8 @@ sub set_cookie {
   }
 
   ### default path to / and allow for 1hour instead of 1h
-  ### (if your gonna make expires useful - make it useful)
   $args->{-path} ||= '/';
-  if ($args->{-expires}
-      && $args->{-expires} =~ m/^([+-]|)\s*(\d+)\s*([a-zA-Z])\w*$/) {
-    $args->{-expires} = ($1) ? "$1$2$3" : "+$2$3";
-  }
+  $args->{-expires} = &time_calc($args->{-expires}) if $args->{-expires};
 
   my $cookie = "" . $self->object->cookie(%$args);
 
@@ -220,15 +227,11 @@ sub last_modified {
   my $self = shift;
   my $time = shift;
   my $key  = shift || 'Last-Modified';
-  if (! defined $time) {
-    $time = time;
-  } elsif ($time =~ m/^([+-]|)\s*(\d+)\s*([a-zA-Z])\w*$/) {
-    $time = ($1) ? "$1$2$3" : "+$2$3";
-  } elsif (-e $time) {
-    $time = (stat _)[9]; # file modified time
-  }
-  require CGI::Util;
-  $time = &CGI::Util::expires($time);
+
+  ### get a time string - looks like:
+  ### Mon Dec  9 18:03:21 2002
+  ### valid RFC (although not prefered)
+  $time = scalar(gmtime(&time_calc(shift)));
 
   if (&content_typed()) {
     print "<meta http-equiv=\"$key\" content=\"$time\" />\n";
@@ -248,6 +251,31 @@ sub expires {
   my $time = shift;
   return $self->last_modified($time, 'Expires');
 }
+
+### similar to expires_calc from CGI::Util
+### allows for lenient calling, hour instead of just h, etc
+### takes time or 0 or now or types of -23minutes 
+sub time_calc {
+  my $time = shift;
+  if (! $time || lc($time) eq 'now') {
+    $time = time;
+  } elsif ($time =~ m/^([+-]?\s*(?:\d+|\d*\.\d+))\s*(\w)\w*$/) {
+    my $m = {
+      's' => 1,
+      'm' => 60,
+      'h' => 60 * 60,
+      'd' => 60 * 60 * 24,
+      'w' => 60 * 60 * 24 * 7,
+      'M' => 60 * 60 * 24 * 30,
+      'y' => 60 * 60 * 24 * 365,
+    };
+    $time = time + ($m->{$2} || 1) * $1;
+  } elsif ($time =~ /\D/) {
+    die "Invalid time passed to time_calc ($time)";
+  }
+  return $time;
+}
+
 
 ### allow for generic status send
 sub send_status {
@@ -315,7 +343,7 @@ sub print_js {
 
   ### no - file - 404
   if (! $stat) {
-    return $self->send_status(404, "File not found\n");
+    return $self->send_status(404, "JS File not found for print_js\n");
   }
 
   ### do headers
@@ -463,6 +491,9 @@ sub swap_template {
 
   ### basic - allow for passing a hash, or object, or code ref
   my $form = shift;
+  $form = $self if ! $form && ref($self);
+  $form = $self->get_form() if UNIVERSAL::isa($form, __PACKAGE__);
+  
   my $get_form_value;
   my $meth;
   if (UNIVERSAL::isa($form, 'HASH')) {
@@ -778,6 +809,11 @@ be read in depending upon file extension.
 Very similar to CGI->new->Val except that arrays are returned as
 arrays.  Not sure why CGI::Val didn't do this anyway.
 
+=item C<-E<gt>set_form>
+
+Allow for setting a custom form hash.  Useful for testing, or other
+purposes.
+
 =item C<-E<gt>get_cookies>
 
 Returns a hash of all cookies.
@@ -786,7 +822,8 @@ Returns a hash of all cookies.
 
 Takes a hash and returns a query_string.  A second optional argument
 may contain an arrayref of keys to use from the hash in building the
-query_string.
+query_string.  First argument is undef, it will use the form stored
+in itself as the hash.
 
 =item C<-E<gt>content_type>
 
@@ -857,17 +894,18 @@ for basic template toolkit variable swapping.  There are two arguments.
 First is a string or a reference to a string.  If a string is passed,
 a copy of that string is swapped and returned.  If a reference to a
 string is passed, it is modified in place.  The second argument is
-a form, or a CGI object, or a cgiex object, or a coderef.  If it is a
-coderef, it should accept key as its only argument and return the
-proper value.
+a form, or a CGI object, or a cgiex object, or a coderef (if the second
+argument is missing, the cgiex object which called the method will be
+used).  If it is a coderef, it should accept key as its only argument and
+return the proper value.
 
   my $cgix = CGI::Ex->new;
   my $form = {foo  => 'bar',
               this => {is => {nested => ['wow', 'wee']}}
              };
 
-  my $str =  $cgix->swap_template("[% foo %]", $form));
-  # $str eq 'bar'
+  my $str =  $cgix->swap_template("<html>[% foo %]<br>[% foo %]</html>", $form));
+  # $str eq '<html>bar<br>bar</html>'
 
   $str = $cgix->swap_template("[% this.is.nested.1 %]", $form));
   # $str eq 'wee'
@@ -875,6 +913,19 @@ proper value.
   $str = "[% this.is.nested.0 %]";
   $cgix->swap_template(\$str, $form);
   # $str eq 'wow'
+
+  # may also be called with only one argument as follows:
+  # assuming $cgix had a query string of ?foo=bar&baz=wow&this=wee
+  $str = "<html>([% foo %]) <br>
+          ([% baz %]) <br>
+          ([% this %]) </html>";
+  $cgix->swap_template(\$str);
+  #$str eq "<html>(bar) <br>
+  #        (wow) <br>
+  #        (wee) </html>";
+  
+For further examples, please see the code contained in t/samples/cgi_ex_*
+of this distribution.
 
 If at a later date, the developer upgrades to Template::Toolkit, the
 templates that were being swapped by CGI::Ex::swap_template should
