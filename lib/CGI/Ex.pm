@@ -1,0 +1,802 @@
+package CGI::Ex;
+
+### CGI Extended
+
+###----------------------------------------------------------------###
+#  Copyright 2003 - Paul Seamons                                     #
+#  Distributed under the Perl Artistic License without warranty      #
+###----------------------------------------------------------------###
+
+### See perldoc at bottom
+
+use strict;
+use vars qw($VERSION
+            $PREFERRED_FILL_MODULE
+            $PREFERRED_CGI_MODULE
+            $PREFERRED_CGI_REQUIRED
+            $PREFERRED_VAL_MODULE
+            $OBJECT_METHOD
+            $AUTOLOAD
+            $DEBUG_LOCATION_BOUNCE
+            @EXPORT @EXPORT_OK
+            );
+use base qw(Exporter);
+use Data::DumpEx;
+
+$VERSION               = '0.94';
+$PREFERRED_FILL_MODULE ||= '';
+$PREFERRED_CGI_MODULE  ||= 'CGI';
+$PREFERRED_VAL_MODULE  ||= '';
+@EXPORT = ();
+@EXPORT_OK = qw(get_form get_cookies
+                content_type content_typed
+                );
+
+###----------------------------------------------------------------###
+
+sub new {
+  my $class = shift || __PACKAGE__;
+  my $self  = ref($_[0]) ? shift : {@_};
+  return bless $self, $class;
+}
+
+### allow for holding another classed CGI style object
+sub object {
+  return shift()->{object} ||= do {
+    $PREFERRED_CGI_REQUIRED ||= do {
+      my $file = $PREFERRED_CGI_MODULE;
+      $file .= ".pm" if $file !~ /\.\w+$/;
+      $file =~ s|::|/|g;
+      eval {require $file};
+      if ($@) {
+        die "Couldn't require $PREFERRED_CGI_MODULE: $@";
+      }
+      1; # return of inner do
+    };
+    $PREFERRED_CGI_MODULE->new(); # return of the do
+  };
+}
+
+### allow for calling their methods
+sub AUTOLOAD {
+  my $self   = shift;
+  my $method = ($AUTOLOAD =~ /(\w+)$/) ? $1 : die "Invalid method $AUTOLOAD";
+  return wantarray # does wantarray propogate up ?
+    ? ($self->object->$method(@_))
+    :  $self->object->$method(@_);
+}
+
+###----------------------------------------------------------------###
+
+### form getter that will act like ->Vars only it will be intelligent
+### thus infering that portions of CGI.pm are unintelligent
+sub get_form {
+  my $self = shift || __PACKAGE__;
+  $self = $self->new if ! ref $self;
+
+  my $obj  = shift || $self->object;
+  my %hash = ();
+  foreach my $key ($obj->param()) {
+    my @val = $obj->param($key);
+    $hash{$key} = ($#val == -1) ? die : ($#val == 0) ? $val[0] : \@val;
+  }
+  return \%hash;
+}
+
+### like get_form - but a hashref of cookies
+### cookies are parsed depending upon the functionality of ->cookie
+sub get_cookies {
+  my $self = shift || __PACKAGE__;
+  $self = $self->new if ! ref $self;
+
+  my $obj  = shift || $self->object;
+  my %hash = ();
+  foreach my $key ($obj->cookie()) {
+    my @val = $obj->cookie($key);
+    $hash{$key} = ($#val == -1) ? die : ($#val == 0) ? $val[0] : \@val;
+  }
+  return \%hash;
+}
+
+### allow for creating a query_string
+sub make_form {
+  my $self = shift;
+  my $form = shift;
+  my $keys = (ref $_[0]) ? {map {$_ => 1} @{ shift() }} : undef;
+  my $str = '';
+  foreach my $key (sort keys %$form) {
+    next if $keys && ! $keys->{$key};
+    $key =~ s/([^\w.\- ])/sprintf('%%%02X',ord($1))/eg;
+    $key =~ y/ /+/;
+    foreach (ref($form->{$key}) ? @{ $form->{$key} } : $form->{$key}) {
+      my $val = $_; # make a copy
+      $val =~ s/([^\w.\- ])/sprintf('%%%02X',ord($1))/eg;
+      $val =~ y/ /+/;
+      $str .= "$key=$val&";
+    }
+  }
+  chop($str);
+  return $str;
+}
+
+###----------------------------------------------------------------###
+
+sub content_type {
+  my $self = ref($_[0]) ? shift : undef;
+  my $type = shift || 'text/html';
+
+  if ($ENV{MOD_PERL} && (my $r = Apache->request)) {
+    return if $r->bytes_sent;
+    $r->content_type($type);
+    $r->send_http_header;
+  } else {
+    if (! $ENV{CONTENT_TYPED}) {
+      print "Content-type: $type\r\n\r\n";
+      $ENV{CONTENT_TYPED} = '';
+    }
+    $ENV{CONTENT_TYPED} .= sprintf("%s, %d\n", (caller)[1,2]);
+  }
+}
+
+sub content_typed {
+  my $self = ref($_[0]) ? shift : undef;
+  if ($ENV{MOD_PERL} && (my $r = Apache->request)) {
+    return $r->bytes_sent;
+  } else {
+    return ($ENV{CONTENT_TYPED}) ? 1 : undef;
+  }
+}
+
+###----------------------------------------------------------------###
+
+### location bounce nicely - even if we have already sent content
+sub location_bounce {
+  my $self = shift;
+  my $loc  = shift || '';
+  if (&content_typed()) {
+    if ($DEBUG_LOCATION_BOUNCE) {
+      print "<a class=debug href=\"$loc\">Location: $loc</a><br />\n";
+    } else {
+      print "<meta http-equiv=\"refresh\" content=\"0;url=$loc\" />\n";
+    }
+  } else {
+    if ($ENV{MOD_PERL} && (my $r = Apache->request)) {
+      $r->header_out("Location", $loc);
+      $r->status(302);
+      $r->content_type('text/html');
+      $r->send_http_header;
+      $r->print("Bounced to $loc\n");
+    } else { 
+      print "Location: $loc\r\n",
+            "Status: 302 Bounce\r\n",
+            "Content-type: text/html\r\n\r\n",
+            "Bounced to $loc\r\n";
+    }
+  }
+}
+
+### set a cookie nicely - even if we have already sent content
+sub set_cookie {
+  my $self = shift;
+  my $args = ref($_[0]) ? shift : {@_};
+  foreach (keys %$args) {
+    next if /^-/;
+    $args->{"-$_"} = delete $args->{$_};
+  }
+
+  ### default path to / and allow for 1hour instead of 1h
+  ### (if your gonna make expires useful - make it useful)
+  $args->{-path} ||= '/';
+  if ($args->{-expires}
+      && $args->{-expires} =~ m/^([+-]|)\s*(\d+)\s*([a-zA-Z])\w*$/) {
+    $args->{-expires} = ($1) ? "$1$2$3" : "+$2$3";
+  }
+
+  my $cookie = "" . $self->object->cookie(%$args);
+
+  if (&content_typed()) {
+    print "<meta http-equiv=\"Set-cookie\" content=\"$cookie\" />\n";
+  } else {
+    if ($ENV{MOD_PERL} && (my $r = Apache->request)) {
+      $r->header_out("Set-cookie", $cookie);
+    } else {
+      print "Set-cookie: $cookie\r\n"
+    }
+  }
+}
+
+### print the last modified time
+### takes a time or filename and an optional keyname
+sub last_modified {
+  my $self = shift;
+  my $time = shift;
+  my $key  = shift || 'Last-Modified';
+  if (! defined $time) {
+    $time = time;
+  } elsif ($time =~ m/^([+-]|)\s*(\d+)\s*([a-zA-Z])\w*$/) {
+    $time = ($1) ? "$1$2$3" : "+$2$3";
+  } elsif (-e $time) {
+    $time = (stat _)[9]; # file modified time
+  }
+  require CGI::Util;
+  $time = &CGI::Util::expires($time);
+
+  if (&content_typed()) {
+    print "<meta http-equiv=\"$key\" content=\"$time\" />\n";
+  } else {
+    if ($ENV{MOD_PERL} && (my $r = Apache->request)) {
+      $r->header_out($key, $time);
+    } else {
+      print "$key: $time\r\n"
+    }
+  }
+
+}
+
+### add expires header
+sub expires { 
+  my $self = shift;
+  my $time = shift;
+  return $self->last_modified($time, 'Expires');
+}
+
+### allow for generic status send
+sub send_status {
+  my $self = shift;
+  my $code = shift || die "Missing status";
+  my $mesg = shift || "HTTP Status of $code received\n";
+  if (&content_typed()) {
+    die "Cannot send a status ($code - $mesg) after content has been sent";
+  }
+  if ($ENV{MOD_PERL} && (my $r = Apache->request)) {
+    $r->status($code);
+    $r->content_type('text/html');
+    $r->send_http_header;
+    $r->print($mesg);
+  } else {
+    print "Status: $code\r\n";
+    &content_type();
+    print $mesg;
+  }
+}
+
+### allow for sending a simple header
+sub send_header {
+  my $self = shift;
+  my $key  = shift;
+  my $value = shift;
+  if (&content_typed()) {
+    die "Cannot send a header ($key - $value) after content has been sent";
+  }
+
+  if ($ENV{MOD_PERL} && (my $r = Apache->request)) {
+    $r->header_out($key, $value);
+  } else {
+    print "$key: $value\r\n";
+  }
+}
+
+###----------------------------------------------------------------###
+
+### allow for printing out a static javascript file
+### for example $self->print_js("CGI::Ex::validate.js");
+sub print_js {
+  my $self    = shift;
+  my $js_file = shift || '';
+
+  ### fix up the file - force .js on the end
+  $js_file .= '.js' if $js_file !~ /\.js$/i;
+  $js_file =~ s|::|/|g;
+
+  ### get file info
+  my $stat;
+  if ($js_file !~ m|^\.{0,2}/|) {
+    foreach my $path (@INC) {
+      my $_file = "$path/$js_file";
+      next if ! -f $_file;
+      $js_file = $_file;
+      $stat = [stat _];
+      last;
+    }
+  } else {
+    if (-f $js_file) {
+      $stat = [stat _];
+    }
+  }
+
+  ### no - file - 404
+  if (! $stat) {
+    return $self->send_status(404, "File not found\n");
+  }
+
+  ### do headers
+  $self->last_modified($stat->[9]);
+  $self->expires('+ 1 year');
+  $self->send_header('Content-length', $stat->[7] || 0);
+  &content_type('application/x-javascript');
+
+  return if $ENV{REQUEST_METHOD} && $ENV{REQUEST_METHOD} eq 'HEAD';
+
+  ### send the contents
+  if (open IN, $js_file) {
+    local $/ = undef;
+    print <IN>;
+    close IN;
+  }
+}
+
+###----------------------------------------------------------------###
+
+### form filler that will use either HTML::FillInForm, CGI::Ex::Fill
+### or another specified filler.  Argument style is similar to
+### HTML::FillInForm.
+sub fill {
+  my $self = shift;
+  my $args = shift;
+  if (ref($args)) {
+    if (! UNIVERSAL::isa($args, 'HASH')) {
+      $args = {text => $args};
+      @$args{'form','target','fill_password','ignore_fields'} = @_;
+    }
+  } else {
+    $args = {$args, @_};
+  }
+
+  my $module = $self->{fill_module} || $PREFERRED_FILL_MODULE;
+
+  ### allow for using the standard HTML::FillInForm
+  ### too bad it won't modify our file in place for us
+  if ($module eq 'HTML::FillInForm') {
+    eval { require HTML::FillInForm };
+    if ($@) {
+      die "Couldn't require HTML::FillInForm: $@";
+    }
+    $args->{scalarref} = $args->{text} if $args->{text};
+    $args->{fdat}      = $args->{form} if $args->{form};
+    my $filled = HTML::FillInForm->new->fill(%$args);
+    if ($args->{text}) {
+      my $ref = $args->{text};
+      $$ref = $filled;
+      return 1;
+    }
+    return $filled;
+
+  ### allow for some other type - for whatever reason
+  } elsif ($module) {
+    my $file = $module;
+    $file .= '.pm' if $file !~ /\.\w+$/;
+    $file =~ s|::|/|g;
+    eval { require $file };
+    if ($@) {
+      die "Couldn't require $module: $@";
+    }
+    return $module->new->fill(%$args);
+
+  ### well - we will use our own then
+  } else {
+    require CGI::Ex::Fill;
+
+    ### get the text to work on
+    my $ref;
+    if ($args->{text}) {           # preferred method - gets modified in place
+      $ref = $args->{text};
+    } elsif ($args->{scalarref}) { # copy to mimic HTML::FillInForm
+      my $str = ${ $args->{scalarref} };
+      $ref = \$str;
+    } elsif ($args->{arrayref}) {  # joined together (copy)
+      my $str = join "", @{ $args->{arrayref} };
+      $ref = \$str;
+    } elsif ($args->{file}) {      # read it in
+      open (IN, $args->{file}) || die "Couldn't open $args->{file}: $!";
+      my $str = '';
+      read(IN, $str, -s _) || die "Couldn't read $args->{file}: $!";
+      close IN;
+      $ref = \$str;
+    } else {
+      die "No suitable text found for fill.";
+    }
+
+    ### allow for data to be passed many ways
+    my $form = $args->{form} || $args->{fobject}
+      || $args->{fdat} || $self->object;
+    
+    &CGI::Ex::Fill::form_fill($ref,
+                              $form,
+                              $args->{target},
+                              $args->{fill_password},
+                              $args->{ignore_fields},
+                              );
+    return ! $args->{text} ? $$ref : 1;
+  }
+
+}
+
+###----------------------------------------------------------------###
+
+sub validate {
+  my $self = shift;
+  my ($form, $file) = (@_ == 2) ? (shift, shift) : ($self->object, shift);
+
+  require CGI::Ex::Validate;
+
+  my $args = {};
+  $args->{raise_error} = 1 if $self->{raise_error};
+  return CGI::Ex::Validate->new($args)->validate($form, $file);
+}
+
+###----------------------------------------------------------------###
+
+sub conf_obj {
+  my $self = shift;
+  return $self->{conf_obj} ||= do {
+    require CGI::Ex::Conf;
+    CGI::Ex::Conf->new(@_);
+  };
+}
+
+sub conf_read {
+  my $self = shift;
+  return $self->conf_obj->read(@_);
+}
+
+###----------------------------------------------------------------###
+
+1;
+
+__END__
+
+=head1 NAME
+
+CGI::Ex - Yet Another Form Utility
+
+=head1 SYNOPSIS
+
+  ### CGI Module Extensions
+
+  my $cgix = CGI::Ex->new;
+  my $hashref = $cgix->get_form; # uses CGI by default
+  
+  $cgix->content_type;
+
+  my $val_hash = $cgix->conf_read($pathtovalidation);
+
+  my $err_obj = $cgix->validate($hashref, $val_hash);
+  if ($err_obj) {
+    my $errors = $err_obj->as_hash;
+    my $content = "Some content";
+    $cgix->fill({text => \$content, form => $hashref});
+    print $content;
+  }
+
+  print "Success\n";
+
+  ### Filling functionality
+
+  $cgix->fill({text => \$text, form    => \%hash});
+  $cgix->fill({text => \$text, fdat    => \%hash});
+  $cgix->fill({text => \$text, fobject => $cgiobject});
+  $cgix->fill({text => \$text, form    => [\%hash1, $cgiobject]});
+  $cgix->fill({text => \$text); # uses $self->object as the form
+  $cgix->fill({text          => \$text,
+                 form          => \%hash,
+                 target        => 'formname',
+                 fill_password => 0,
+                 ignore_fields => ['one','two']});
+  $cgix->fill(\$text); # uses $self->object as the form
+  $cgix->fill(\$text, \%hash, 'formname', 0, ['one','two']);
+  my $copy = $cgix->fill({scalarref => \$text,    fdat => \%hash});
+  my $copy = $cgix->fill({arrayref  => \@lines,   fdat => \%hash});
+  my $copy = $cgix->fill({file      => $filename, fdat => \%hash});
+
+  ### Validation functionality
+
+  my $err_obj = $cgix->validate($form, $val_hash);
+  my $err_obj = $cgix->validate($form, $path_to_validation);
+  my $err_obj = $cgix->validate($form, $yaml_string);
+
+  ### get errors separated by key name
+  ### useful for inline errors
+  my $hash = $err_obj->as_hash;
+  my %hash = $err_obj->as_hash;
+
+  ### get aggregate list of errors
+  ### useful for central error description
+  my $array = $err_obj->as_array;
+  my @array = $err_obj->as_array;
+
+  ### get a string
+  ### useful for central error description
+  my $string = $err_obj->as_string;
+  my $string = "$err_obj";
+
+  $cgix->{raise_error} = 1;
+  $cgix->validate($form, $val_hash);
+    # SAME AS #
+  my $err_obj = $cgix->validate($form, $val_hash);
+  die $err_obj if $err_obj;
+
+  ### Settings functionality
+
+  ### read file via yaml
+  my $ref = $cgix->conf_read('/full/path/to/conf.yaml');
+
+  ### merge all found settings.pl files together
+  @CGI::Ex::Conf::DEFAULT_PATHS = qw(/tmp /my/data/dir /home/foo);
+  @CGI::Ex::Conf::DIRECTIVE     = 'MERGE';
+  @CGI::Ex::Conf::DEFAULT_EXT   = 'pl';
+  my $ref = $cgix->conf_read('settings');
+
+=head1 DESCRIPTION
+
+CGI::Ex is another form filler / validator / conf reader / template
+interface.  Its goal is to take the wide scope of validators and other
+useful CGI application modules out there and merge them into one
+utility that has all of the necessary features of them all, as well
+as several extended methods that I have found useful in working on the web.
+
+The main functionality is provided by several other modules that
+may be used separately, or together through the CGI::Ex interface.
+
+=over 4
+
+=item C<CGI::Ex::Fill>
+
+A regular expression based form filler inner (accessed through B<-E<gt>fill>
+or directly via its own functions).  Can be a drop in replacement for
+HTML::FillInForm.  See L<CGI::Ex::Fill> for more information.
+
+=item C<CGI::Ex::Validate>
+
+A form field / cgi parameter / any parameter validator (accessed through
+B<-E<gt>validate> or directly via its own methods).  Not quite a drop in
+for most validators, although it has most of the functionality of most
+of the validators but with the key additions of conditional validation.
+Has a tightly integrated JavaScript portion that allows for duplicate client
+side validation.  See L<CGI::Ex::Validate> for more information.
+
+=item C<CGI::Ex::Conf>
+
+A general use configuration, or settings, or key / value file reader.  Has
+ability for providing key fallback as well as immutable key definitions.  Has
+default support for yaml, storable, perl, ini, and xml and open architecture
+for definition of others.  See L<CGI::Ex::Conf> for more information.
+
+=back
+
+=head1 METHODS
+
+=over 4
+
+=item C<-E<gt>fill>
+
+fill is used for filling hash or cgi object values into an existing
+html document (it doesn't deal at all with how you got the document).
+Arguments may be given as a hash, or a hashref or positional.  Some
+of the following arguments will only work using CGI::Ex::Fill - most
+will work with either CGI::Ex::Fill or HTML::FillInForm (assume they
+are available unless specified otherwise).  (See L<CGI::Ex::Fill> for
+a full explanation of functionality).  The arguments to fill are as
+follows (and in order of position):
+
+=over 4
+
+=item C<text>
+
+Text should be a reference to a scalar string containing the html to
+be modified (actually it could be any reference or object reference
+that can be modfied as a string).  It will be modified in place.
+Another named argument B<scalarref> is available if you would like to
+copy rather than modify.
+
+=item C<form>
+
+Form may be a hashref, a cgi style object, a coderef, or an array of
+multiple hashrefs, cgi objects, and coderefs.  Hashes should be key
+value pairs.  CGI objects should be able
+to call the method B<param> (This can be overrided).  Coderefs should
+expect expect the field name as an argument and should return a value.
+Values returned by form may be undef, scalar, arrayref, or coderef 
+(coderef values should expect an argument of field name and should
+return a value).  The code ref options are available to delay or add
+options to the bringing in of form informatin - without having to
+tie the hash.  Coderefs are not available in HTML::FillInForm.  Also
+HTML::FillInForm only allows CGI objects if an arrayref is used.
+
+NOTE: Only one of the form, fdat, and fobject arguments are allowed at
+a time.
+
+=item C<target>
+
+The name of the form that the fields should be filled to.  The default
+value of undef, means to fill in all forms in the html.
+
+=item C<fill_passwords>
+
+Boolean value defaults to 1.  If set to zero - password fields will
+not be filled.
+
+=item C<ignore_fields>
+
+Specify which fields to not fill in.  It takes either array ref of
+names, or a hashref with the names as keys.  The hashref option is
+not available in CGI::Ex::Fill.
+
+=back
+
+Other named arguments are available for compatiblity with HTML::FillInForm.
+They may only be used as named arguments.
+
+=over 4
+
+=item C<scalarref>
+
+Almost the same as the argument text.  If scalarref is used, the filled
+html will be returned.  If text is used the html passed is filled in place.
+
+=item C<arrayref>
+
+An array ref of lines of the document.  Forces a returned filled html
+document.
+
+=item C<file>
+
+An filename that will be opened, filled, and returned.
+
+=item C<fdat>
+
+A hashref of key value pairs.
+
+=item C<fobject>
+
+A cgi style object or arrayref of cgi style objects used for getting
+the key value pairs.
+
+=back
+
+See L<CGI::Ex::Fill> for more information about the filling process.
+
+=item C<-E<gt>object>
+
+Returns the CGI object that is currently being used by CGI::Ex.  If none
+has been set it will automatically generate an object of type
+$PREFERRED_CGI_MODULE which defaults to B<CGI>.
+
+=item C<-E<gt>validate>
+
+Validate has a wide range of options available. (See L<CGI::Ex::Validate>
+for a full explanation of functionality).  Validate has two arguments:
+
+=over 4
+
+=item C<form>
+
+Can be either a hashref to be validated, or a CGI style object (which
+has the param method).
+
+=item C<val_hash>
+
+The val_hash can be one of three items.  First, it can be a straight
+perl hashref containing the validation to be done.  Second, it can
+be a YAML document string.  Third, it can be the path to a file
+containing the validation.  The validation in a validation file will
+be read in depending upon file extension.
+
+=back
+
+=item C<-E<gt>get_form>
+
+Very similar to CGI->new->Val except that arrays are returned as
+arrays.  Not sure why CGI::Val didn't do this anyway.
+
+=item C<-E<gt>get_cookies>
+
+Returns a hash of all cookies.
+
+=item C<-E<gt>make_form>
+
+Takes a hash and returns a query_string.  A second optional argument
+may contain an arrayref of keys to use from the hash in building the
+query_string.
+
+=item C<-E<gt>content_type>
+
+Can be called multiple times during the same session.  Will only
+print content-type once.  (Useful if you don't know if something
+else already printed content-type).
+
+=item C<-E<gt>set_cookie>
+
+Arguments are the same as those to CGI->new->cookie({}).
+Uses CGI's cookie method to create a cookie, but then, depending on
+if content has already been sent to the browser will either print
+a Set-cookie header, or will add a <meta http-equiv='set-cookie'>
+tag (this is supported on most major browsers).  This is useful if
+you don't know if something else already printed content-type.
+
+=item C<-E<gt>location_bounce>
+
+Depending on if content has already been sent to the browser will either print
+a Location header, or will add a <meta http-equiv='refresh'>
+tag (this is supported on all major browsers).  This is useful if
+you don't know if something else already printed content-type.  Takes
+single argument of a url.
+
+=item C<-E<gt>last_modified>
+
+Depending on if content has already been sent to the browser will either print
+a Last-Modified header, or will add a <meta http-equiv='Last-Modified'>
+tag (this is supported on most major browsers).  This is useful if
+you don't know if something else already printed content-type.  Takes an
+argument of either a time (may be a CGI -expires style time) or a filename.
+
+=item C<-E<gt>expires>
+
+Depending on if content has already been sent to the browser will either print
+a Expires header, or will add a <meta http-equiv='Expires'>
+tag (this is supported on most major browsers).  This is useful if
+you don't know if something else already printed content-type.  Takes an
+argument of a time (may be a CGI -expires style time).
+
+=item C<-E<gt>send_status>
+
+Send a custom status.  Works in both CGI and mod_perl.  Arguments are
+a status code and the content (optional).
+
+=item C<-E<gt>send_header>
+
+Send a http header.  Works in both CGI and mod_perl.  Arguments are
+a header name and the value for that header.
+
+=item C<-E<gt>print_js>
+
+Prints out a javascript file.  Does everything it can to make sure
+that the javascript will cache.  Takes either a full filename,
+or a shortened name which will be looked for in @INC. (ie /full/path/to/my.js
+or CGI/Ex/validate.js or CGI::Ex::validate)
+
+=back
+
+=head1 EXISTING MODULES
+
+The following is a list of existing validator and formfiller modules
+at the time of this writing (I'm sure this probably isn't exaustive).
+
+=over 4
+
+=item C<Email::Valid> - Validator
+
+=item C<SSN::Validate> - Validator
+
+=item C<Embperl::Form::Validate> - Validator
+
+=item C<Data::CGIForm> - Validator
+
+=item C<HTML::FillInForm> - Form filler-iner
+
+=item C<CGI> - CGI Getter.  Form filler-iner
+
+=head1 TODO
+
+Add an integrated template toolkit interface.
+
+Add an integrated debug module.
+
+=head1 MODULES
+
+See also L<CGI::Ex::Fill>.
+
+See also L<CGI::Ex::Validate>.
+
+See also L<CGI::Ex::Conf>.
+
+=head1 AUTHOR
+
+Paul Seamons
+
+=head1 LICENSE
+
+This module may be distributed under the same terms as Perl itself.
+
+=cut
+
+1;
