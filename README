@@ -7,16 +7,20 @@ SYNOPSIS
       my $cgix = CGI::Ex->new;
       my $hashref = $cgix->get_form; # uses CGI by default
   
+      ### send the Content-type header - whether or not we are mod_perl
       $cgix->content_type;
 
       my $val_hash = $cgix->conf_read($pathtovalidation);
 
       my $err_obj = $cgix->validate($hashref, $val_hash);
       if ($err_obj) {
-        my $errors = $err_obj->as_hash;
-        my $content = "Some content";
+        my $errors  = $err_obj->as_hash;
+        my $input   = "Some content";
+        my $content = "";
+        SomeTemplateObject->process($input, $errors, $content);
         $cgix->fill({text => \$content, form => $hashref});
         print $content;
+        exit;
       }
 
       print "Success\n";
@@ -218,7 +222,9 @@ METHODS
     "->content_type"
         Can be called multiple times during the same session. Will only
         print content-type once. (Useful if you don't know if something else
-        already printed content-type).
+        already printed content-type). Calling this sends the Content-type
+        header. Trying to print ->content_type is an error. For clarity, the
+        method ->print_content_type is available.
 
     "->set_cookie"
         Arguments are the same as those to CGI->new->cookie({}). Uses CGI's
@@ -265,6 +271,38 @@ METHODS
         shortened name which will be looked for in @INC. (ie
         /full/path/to/my.js or CGI/Ex/validate.js or CGI::Ex::validate)
 
+    "->swap_template"
+        This is intended as a simple yet strong subroutine to swap in tags
+        to a document. It is intended to be very basic for those who may not
+        want the full features of a Templating system such as
+        Template::Toolkit (even though they should investigate them because
+        they are pretty nice). The default allows for basic template toolkit
+        variable swapping. There are two arguments. First is a string or a
+        reference to a string. If a string is passed, a copy of that string
+        is swapped and returned. If a reference to a string is passed, it is
+        modified in place. The second argument is a form, or a CGI object,
+        or a cgiex object, or a coderef. If it is a coderef, it should
+        accept key as its only argument and return the proper value.
+
+          my $cgix = CGI::Ex->new;
+          my $form = {foo  => 'bar',
+                      this => {is => {nested => ['wow', 'wee']}}
+                     };
+
+          my $str =  $cgix->swap_template("[% foo %]", $form));
+          # $str eq 'bar'
+
+          $str = $cgix->swap_template("[% this.is.nested.1 %]", $form));
+          # $str eq 'wee'
+
+          $str = "[% this.is.nested.0 %]";
+          $cgix->swap_template(\$str, $form);
+          # $str eq 'wow'
+
+        If at a later date, the developer upgrades to Template::Toolkit, the
+        templates that were being swapped by CGI::Ex::swap_template should
+        be compatible with Template::Toolkit.
+
 EXISTING MODULES
     The following is a list of existing validator and formfiller modules at
     the time of this writing (I'm sure this probably isn't exaustive).
@@ -287,6 +325,12 @@ MODULES
         See also CGI::Ex::Validate.
 
         See also CGI::Ex::Conf.
+
+        See also CGI::Ex::Die.
+
+        See also CGI::Ex::App.
+
+        See also CGI::Ex::Dump.
 
 AUTHOR
         Paul Seamons

@@ -21,7 +21,7 @@ use vars qw($VERSION
             );
 use Exporter;
 
-$VERSION   = '1.1';
+$VERSION   = '1.3';
 @ISA       = qw(Exporter);
 @EXPORT    = qw(form_fill);
 @EXPORT_OK = qw(form_fill html_escape get_tagval_by_key swap_tagval_by_key);
@@ -103,13 +103,14 @@ sub form_fill {
     }
 
     my $val;
+    my $meth;
     foreach my $form (@$forms) {
       next if ! ref $form;
       if (UNIVERSAL::isa($form, 'HASH') && defined $form->{$key}) {
         $val = $form->{$key};
         last;
-      } elsif (UNIVERSAL::can($form, $OBJECT_METHOD)) {
-        $val = $form->$OBJECT_METHOD($key);
+      } elsif ($meth = UNIVERSAL::can($form, $OBJECT_METHOD)) {
+        $val = $form->$meth($key);
         last if defined $val;
       } elsif (UNIVERSAL::isa($form, 'CODE')) {
         $val = &{ $form }($key, $TEMP_TARGET);
@@ -311,30 +312,18 @@ sub html_escape {
 sub get_tagval_by_key {
   my $tag = shift;
   my $ref = ref($tag) ? $tag : \$tag;
-  my $key = shift;
+  my $key = lc(shift);
   my $all = $_[0] && $_[0] eq 'all';
   my @all = ();
-  ### this is the old way and is actually slower
-  #while ($$ref =~ m{(?<!\w|\.)    # isn't preceded by a word or dot
-  #                    \Q$key\E    # the key
-  #                    \s*=\s*     # equals
-  #                    ([\"\']?)   # possible opening quote
-  #                    (|.*?[^\\]) # nothing or anything not ending in \
-  #                    \1          # close quote
-  #                    (?=\s|>|/>) # a space or closing >
-  #                  }sigx) {
-  #  my ($quot, $val) = ($1, $2);
-  #  $val =~ s/\\$quot/$quot/g if $quot; # unescape escaped quotes
-  #  return $val if ! $all;
-  #  push @all, $val;
-  #}
-  $key = lc($key);
+  pos($$ref) = 0; # fix for regex below not resetting and forcing order on key value pairs
+
+  ### loop looking for tag pairs
   while ($$ref =~ m{
-    (?<!\w|\.)
-      (\S+)                     # 1 - the key
-      \s*=\s*                   # equals
-      (?: ([\"\'])(|.*?[^\\])\2 # 2 - a quote, 3 - the quoted
-       |  (.*?(?=\s|>|/>))      # 4 - a non-quoted string
+    (?<![\w\.\-])                  # 0 - not proceded by letter or .
+      ([\w\.\-]+)                  # 1 - the key
+      \s*=                         # equals
+      (?: \s*([\"\'])(|.*?[^\\])\2 # 2 - a quote, 3 - the quoted
+       |  ([^\s/]*? (?=\s|>|/>))   # 4 - a non-quoted string
        )
     }sigx) {
     next if lc($1) ne $key;
@@ -353,38 +342,29 @@ sub get_tagval_by_key {
 sub swap_tagval_by_key {
   my $tag = shift;
   my $ref = ref($tag) ? $tag : \$tag;
-  my $key = shift;
+  my $key = lc(shift);
   my $val = shift;
   my $n   = 0;
 
-  ### this commented method is faster but doesn't handle nested
-  ### html or javascript at all
-  #  $$ref =~ s{(?<!\w|\.)    # isn't preceded by a word or dot
-  #               (\Q$key\E   # the key
-  #               \s*=\s*)    # equals
-  #               ([\"\']?)   # possible opening quote
-  #               (|.*?[^\\]) # nothing or anything not ending in \
-  #               \2          # close quote
-  #               (?=\s|>|/>) # a space or closing >
-  #             }{
-  #               ($n++) ? "" : "$1$2$val$2";
-  #             }sigex;
-  $$ref =~ s{(^\s*<\s*\w+\s+|\G\s+)         # 1 - open tag or previous position
-               ( (\w+)                      # 2 - group, 3 - the key
-                 (\s*=\s*)                  # 4 - equals
-                  (?: ([\"\'])(|.*?[^\\])\5 # 5 - a quote, 6 - the quoted
-                   |  (.*?(?=\s|>|/>))      # 7 - a non-quoted string
+  ### swap a key/val pair at time
+  $$ref =~ s{(^\s*<\s*\w+\s+ | \G\s+)         # 1 - open tag or previous position
+               ( ([\w\-\.]+)                  # 2 - group, 3 - the key
+                 (\s*=)                       # 4 - equals
+                  (?: \s* ([\"\']) (?:|.*?[^\\]) \5 # 5 - the quote mark, the quoted
+                   |  [^\s/]*? (?=\s|>|/>)    # a non-quoted string (may be zero length)
                   )
-                | (?: .+?(?=\s|>|/>))       # a non keyvalue chunk (CHECKED)
+                | ([^\s/]+?) (?=\s|>|/>)      # 6 - a non keyvalue chunk (CHECKED)
                )
              }{
-               if (defined($3) && $3 eq $key) { # has matching key
+               if (defined($3) && lc($3) eq $key) { # has matching key value pair
                  if (! $n ++) {  # only put value back on first match
-                   if ($5) {     # quoted
-                     "$1$3$4$5$val$5";
-                   } else {      # non-quoted
-                     "$1$3$4$val";
-                   }
+                   "$1$3$4\"$val\""; # always double quote
+                 } else {
+                   $1; # second match
+                 }
+               } elsif (defined($6) && lc($6) eq $key) { # has matching key
+                 if (! $n ++) {  # only put value back on first match
+                   "$1$6=\"$val\"";
                  } else {
                    $1; # second match
                  }
@@ -409,6 +389,8 @@ __END__
 ###----------------------------------------------------------------###
 
 =head1 NAME
+
+CGI::Ex::Fill - Yet another form filler
 
 =head1 SYNOPSIS
 

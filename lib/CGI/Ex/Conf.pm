@@ -21,7 +21,7 @@ use vars qw($VERSION
             $HTML_KEY
             );
 
-$VERSION = '0.1';
+$VERSION = '0.2';
 
 $DEFAULT_EXT = 'conf';
 
@@ -34,6 +34,7 @@ $DEFAULT_EXT = 'conf';
                 'val'      => \&read_handler_yaml,
                 'xml'      => \&read_handler_xml,
                 'yaml'     => \&read_handler_yaml,
+                'yml'      => \&read_handler_yaml,
                 'html'     => \&read_handler_html,
                 'htm'      => \&read_handler_html,
                 );
@@ -78,6 +79,8 @@ sub read_ref {
     return &yaml_load($file);
 
   ### otherwise base it off of the file extension
+  } elsif ($args->{file_type}) {
+    $ext = $args->{file_type};
   } elsif ($file =~ /\.(\w+)$/) {
     $ext = $1;
   } else {
@@ -123,8 +126,8 @@ sub read {
   ### allow for fast short ciruit on path lookup for several cases
   my $directive;
   my @paths = ();
-  if (ref($namespace)                 # already a ref
-      || index($namespace,"\n") != -1 # yaml string to read in
+  if (ref($namespace)                   # already a ref
+      || index($namespace,"\n") != -1   # yaml string to read in
       || $namespace =~ m|^\.{0,2}/.+$|  # absolute or relative file
       ) {
     push @paths, $namespace;
@@ -147,7 +150,11 @@ sub read {
     }
   }
 
-
+  ### make sure we have at least one path
+  if ($#paths == -1) {
+    die "Couldn't find a path for namespace $namespace.  Perhaps you need to pass paths => \@paths";
+  }
+  
   ### now loop looking for a ref
   foreach my $path (@paths) {
     my $ref = $self->read_ref($path, $args) || next;

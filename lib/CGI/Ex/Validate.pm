@@ -17,13 +17,16 @@ use vars qw($VERSION
             $JS_URI_PATH
             $JS_URI_PATH_YAML
             $JS_URI_PATH_VALIDATE
+            $QR_EXTRA
+            @UNSUPPORTED_BROWSERS
             );
 
-$VERSION = '0.94';
+$VERSION = '0.98';
 
 $ERROR_PACKAGE = 'CGI::Ex::Validate::Error';
-
-$DEFAULT_EXT = 'val';
+$DEFAULT_EXT   = 'val';
+$QR_EXTRA      = qr/^(\w+_error|as_(array|string|hash)_\w+|no_\w+)/;
+@UNSUPPORTED_BROWSERS = (qr/MSIE\s+5.0\d/i);
 
 use CGI::Ex::Conf ();
 
@@ -121,7 +124,7 @@ sub validate {
     my %found = ();
     foreach my $field_val (@$fields) {
       my $field = $field_val->{'field'} || die "Missing field key in validation";
-      die "Duplicate order found for $field in group order or fields" if $found{$field};
+      #die "Duplicate order found for $field in group order or fields" if $found{$field};
       $found{$field} = 1;
     }
 
@@ -180,8 +183,7 @@ sub validate {
 
   ### store any extra items from self
   foreach my $key (keys %$self) {
-    next if $key !~ /_error$/
-      && $key !~ /^(raise_error|as_hash_\w+|as_array_\w+|as_string_\w+)$/;
+    next if $key !~ $QR_EXTRA;
     $EXTRA{$key} = $self->{$key};
   }
 
@@ -740,13 +742,29 @@ sub get_validation_keys {
 
 ### spit out a chunk that will do the validation
 sub generate_js {
+  ### allow for some browsers to not receive the validation
+  if ($ENV{HTTP_USER_AGENT}) {
+    foreach (@UNSUPPORTED_BROWSERS) {
+      next if $ENV{HTTP_USER_AGENT} !~ $_;
+      return "<!-- JS Validation not supported in this browser $_ -->"
+    }
+  }
+
   my $self        = shift;
   my $val_hash    = shift || die "Missing validation";
   my $form_name   = shift || die "Missing form name";
   my $js_uri_path = shift || $JS_URI_PATH;
   $val_hash = $self->get_validation($val_hash);
   require YAML;
-  my $str = &YAML::Dump($val_hash);
+
+  ### store any extra items from self
+  my %EXTRA = ();
+  foreach my $key (keys %$self) {
+    next if $key !~ $QR_EXTRA;
+    $EXTRA{"general $key"} = $self->{$key};
+  }
+
+  my $str = &YAML::Dump((scalar keys %EXTRA) ? (\%EXTRA) : () , $val_hash);
   $str =~ s/(?<!\\)\\(?=[sSdDwWbB0-9?.*+|\-\^\${}()\[\]])/\\\\/g;
   $str =~ s/\n/\\n\\\n/g; # allow for one big string
   $str =~ s/\"/\\\"/g; # quotify it
@@ -920,7 +938,7 @@ sub get_error_text {
 
   ### the the name of this thing
   my $name = $field_val->{'name'} || "The field $field";
-  $name =~ s/$(\d+)/defined($ifs_match->[$1]) ? $ifs_match->[$1] : ''/eg if $ifs_match;
+  $name =~ s/\$(\d+)/defined($ifs_match->[$1]) ? $ifs_match->[$1] : ''/eg if $ifs_match;
 
   ### type can look like "required" or "required2" or "required100023"
   ### allow for fallback from required100023_error through required_error
@@ -961,7 +979,7 @@ sub get_error_text {
     } elsif ($type eq 'equals') {
       my $field2 = $field_val->{"equals${dig}"};
       my $name2  = $field_val->{"equals${dig}_name"} || "the field $field2";
-      $name2 =~ s/$(\d+)/defined($ifs_match->[$1]) ? $ifs_match->[$1] : ''/eg if $ifs_match;
+      $name2 =~ s/\$(\d+)/defined($ifs_match->[$1]) ? $ifs_match->[$1] : ''/eg if $ifs_match;
       $return = "$name did not equal $name2.";
   
     } elsif ($type eq 'min_len') {
@@ -1011,7 +1029,7 @@ __END__
 
 CGI::Ex::Validate - Yet another form validator - does good javascript too
 
-$Id: Validate.pm,v 1.47 2003/12/02 04:52:49 pauls Exp $
+$Id: Validate.pm,v 1.56 2004/03/19 21:45:21 pauls Exp $
 
 =head1 SYNOPSIS
 
@@ -1451,7 +1469,7 @@ $self->{dbh} is a coderef - they will be called and should return a dbh.
 =item C<custom>
 
 Custom value - not available in JS.  Allows for extra programming types.
-May be either a boolean value predermined before calling validate, or may be
+May be either a boolean value predetermined before calling validate, or may be
 a coderef that will be called during validation.  If coderef is called, it will
 be passed the field name, the form value for that name, and a reference to the
 field validation hash.  If the custom type returns false the element fails
@@ -1464,6 +1482,32 @@ validation and an error is added.
       # do something here
       return 0;
     },
+  }
+
+=item C<custom_js>
+
+Custom value - only available in JS.  Allows for extra programming types.
+May be either a boolean value predermined before calling validate, or may be
+section of javascript that will be eval'ed.  The last value (return value) of
+the eval'ed javascript will determine if validation passed.  A false value indicates
+the value did not pass validation.  A true value indicates that it did.  See
+the t/samples/js_validate_3.html page for a sample of usage.
+
+  {
+    field => 'date',
+    required => 1,
+    match    => 'm|^\d\d\d\d/\d\d/\d\d$|',
+    match_error => 'Please enter date in YYYY/MM/DD format',
+    custom_js => "
+      var t=new Date();
+      var y=t.getYear()+1900;
+      var m=t.getMonth() + 1;
+      var d=t.getDate();
+      if (m<10) m = '0'+m;
+      if (d<10) d = '0'+d;
+      (value > ''+y+'/'+m+'/'+d) ? 1 : 0;
+    ",
+    custom_js_error => 'The date was not greater than today.',
   }
 
 =item C<type>
@@ -1622,8 +1666,8 @@ postpended onto the error string.
     as_array_prefix  => '  - ',
     as_array_title   => 'Something went wrong:',
     as_string_join   => '<br />',
-    as_string_header => '<span class="error">'
-    as_string_footer => '</span>'
+    as_string_header => '<span class="error">',
+    as_string_footer => '</span>',
   });
   # $string looks like
   # '<span class="error">Something went wrong:<br />  - error1<br />  - error2</span>'

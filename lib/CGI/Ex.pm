@@ -16,16 +16,21 @@ use vars qw($VERSION
             $PREFERRED_CGI_REQUIRED
             $PREFERRED_VAL_MODULE
             $OBJECT_METHOD
+            $TEMPLATE_OPEN
+            $TEMPLATE_CLOSE
             $AUTOLOAD
             $DEBUG_LOCATION_BOUNCE
             @EXPORT @EXPORT_OK
             );
 use base qw(Exporter);
 
-$VERSION               = '0.95';
+$VERSION               = '0.98';
 $PREFERRED_FILL_MODULE ||= '';
 $PREFERRED_CGI_MODULE  ||= 'CGI';
 $PREFERRED_VAL_MODULE  ||= '';
+$OBJECT_METHOD         ||= 'param';
+$TEMPLATE_OPEN         ||= qr/\[%\s*/;
+$TEMPLATE_CLOSE        ||= qr/\s*%\]/;
 @EXPORT = ();
 @EXPORT_OK = qw(get_form get_cookies
                 content_type content_typed
@@ -120,6 +125,11 @@ sub make_form {
 
 ###----------------------------------------------------------------###
 
+sub print_content_type {
+  &content_type;
+}
+
+### will send the Content-type header
 sub content_type {
   my $self = ref($_[0]) ? shift : undef;
   my $type = shift || 'text/html';
@@ -440,6 +450,83 @@ sub conf_read {
 
 ###----------------------------------------------------------------###
 
+### This is intended as a simple yet strong subroutine to swap
+### in tags to a document.  It is intended to be very basic
+### for those who may not want the full features of a Templating
+### system such as Template::Toolkit (even though they should
+### investigate them because they are pretty nice)
+sub swap_template {
+  my $self = shift;
+  my $str  = shift;
+  return $str if ! $str;
+  my $ref  = ref($str) ? $str : \$str;
+
+  ### basic - allow for passing a hash, or object, or code ref
+  my $form = shift;
+  my $get_form_value;
+  my $meth;
+  if (UNIVERSAL::isa($form, 'HASH')) {
+    $get_form_value = sub {
+      my $key = shift;
+      return defined($form->{$key}) ? $form->{$key} : '';
+    };
+  } elsif ($meth = UNIVERSAL::can($form, $OBJECT_METHOD)) {
+    $get_form_value = sub {
+      my $key = shift;
+      my $val = $form->$meth($key);
+      return defined($val) ? $val : '';
+    };
+  } elsif (UNIVERSAL::isa($form, 'CODE')) {
+    $get_form_value = sub {
+      my $key = shift;
+      my $val = &{ $form }($key);
+      return defined($val) ? $val : '';
+    };
+  } else {
+    die "Not sure how to use $form passed to swap_template_tags";
+  }
+
+  ### now do the swap
+  $$ref =~ s{$TEMPLATE_OPEN \b (\w+) ((?:\.\w+)*) \b $TEMPLATE_CLOSE}{
+    if (! $2) {
+      &$get_form_value($1);
+    } else {
+      my @extra = split(/\./, substr($2,1));
+      my $ref   = &$get_form_value($1);
+      my $val;
+      while (defined(my $key = shift(@extra))) {
+        if (UNIVERSAL::isa($ref, 'HASH')) {
+          if (! exists($ref->{$key}) || ! defined($ref->{$key})) {
+            $val = '';
+            last;
+          }
+          $ref = $ref->{$key};
+        } elsif (UNIVERSAL::isa($ref, 'ARRAY')) {
+          if (! exists($ref->[$key]) || ! defined($ref->[$key])) {
+            $val = '';
+            last;
+          }
+          $ref = $ref->[$key];
+        } else {
+          $val = '';
+          last;
+        }
+      }
+      if (! defined($val)) {
+        if ($#extra == -1) {
+          $val = $ref;
+        }
+        $val = '' if ! defined($val);
+      }
+      $val; # return of the swap
+    }
+  }xeg;
+
+  return ref($str) ? 1 : $$ref;
+}
+
+###----------------------------------------------------------------###
+
 1;
 
 __END__
@@ -455,16 +542,20 @@ CGI::Ex - Yet Another Form Utility
   my $cgix = CGI::Ex->new;
   my $hashref = $cgix->get_form; # uses CGI by default
   
+  ### send the Content-type header - whether or not we are mod_perl
   $cgix->content_type;
 
   my $val_hash = $cgix->conf_read($pathtovalidation);
 
   my $err_obj = $cgix->validate($hashref, $val_hash);
   if ($err_obj) {
-    my $errors = $err_obj->as_hash;
-    my $content = "Some content";
+    my $errors  = $err_obj->as_hash;
+    my $input   = "Some content";
+    my $content = "";
+    SomeTemplateObject->process($input, $errors, $content);
     $cgix->fill({text => \$content, form => $hashref});
     print $content;
+    exit;
   }
 
   print "Success\n";
@@ -701,7 +792,9 @@ query_string.
 
 Can be called multiple times during the same session.  Will only
 print content-type once.  (Useful if you don't know if something
-else already printed content-type).
+else already printed content-type).  Calling this sends the Content-type
+header.  Trying to print -E<gt>content_type is an error.  For clarity,
+the method -E<gt>print_content_type is available.
 
 =item C<-E<gt>set_cookie>
 
@@ -753,6 +846,40 @@ that the javascript will cache.  Takes either a full filename,
 or a shortened name which will be looked for in @INC. (ie /full/path/to/my.js
 or CGI/Ex/validate.js or CGI::Ex::validate)
 
+=item C<-E<gt>swap_template>
+
+This is intended as a simple yet strong subroutine to swap
+in tags to a document.  It is intended to be very basic
+for those who may not want the full features of a Templating
+system such as Template::Toolkit (even though they should
+investigate them because they are pretty nice).  The default allows
+for basic template toolkit variable swapping.  There are two arguments.
+First is a string or a reference to a string.  If a string is passed,
+a copy of that string is swapped and returned.  If a reference to a
+string is passed, it is modified in place.  The second argument is
+a form, or a CGI object, or a cgiex object, or a coderef.  If it is a
+coderef, it should accept key as its only argument and return the
+proper value.
+
+  my $cgix = CGI::Ex->new;
+  my $form = {foo  => 'bar',
+              this => {is => {nested => ['wow', 'wee']}}
+             };
+
+  my $str =  $cgix->swap_template("[% foo %]", $form));
+  # $str eq 'bar'
+
+  $str = $cgix->swap_template("[% this.is.nested.1 %]", $form));
+  # $str eq 'wee'
+
+  $str = "[% this.is.nested.0 %]";
+  $cgix->swap_template(\$str, $form);
+  # $str eq 'wow'
+
+If at a later date, the developer upgrades to Template::Toolkit, the
+templates that were being swapped by CGI::Ex::swap_template should
+be compatible with Template::Toolkit.
+
 =back
 
 =head1 EXISTING MODULES
@@ -787,6 +914,12 @@ See also L<CGI::Ex::Fill>.
 See also L<CGI::Ex::Validate>.
 
 See also L<CGI::Ex::Conf>.
+
+See also L<CGI::Ex::Die>.
+
+See also L<CGI::Ex::App>.
+
+See also L<CGI::Ex::Dump>.
 
 =head1 AUTHOR
 
