@@ -21,7 +21,7 @@ use vars qw($VERSION
             @UNSUPPORTED_BROWSERS
             );
 
-$VERSION = '1.00';
+$VERSION = '1.10';
 
 $ERROR_PACKAGE = 'CGI::Ex::Validate::Error';
 $DEFAULT_EXT   = 'val';
@@ -69,6 +69,7 @@ sub validate {
               : __PACKAGE__->new;                           # &validate
   my $form     = shift || die "Missing form hash";
   my $val_hash = shift || die "Missing validation hash";
+  my $what_was_validated = shift; # allow for extra arrayref that stores what was validated
 
   ### turn the form into a form if it is really a CGI object
   if (! ref($form)) {
@@ -141,7 +142,7 @@ sub validate {
     ### now lets do the validation
     my $found  = 1;
     my @errors = ();
-    my $hold_error;
+    my $hold_error; # hold the error for a moment - to allow for an "Or" operation
     foreach (my $i = 0; $i <= $#$fields; $i ++) {
       my $ref = $fields->[$i];
       if (! ref($ref) && $ref eq 'OR') {
@@ -164,7 +165,9 @@ sub validate {
       } else {
         $hold_error = undef;
       }
+      push(@$what_was_validated, $ref) if $what_was_validated;
     }
+    push(@errors, @$hold_error) if $hold_error; # allow for final OR to work
 
     ### add on errors as requested
     if ($#errors != -1) {
@@ -1071,7 +1074,7 @@ __END__
 
 CGI::Ex::Validate - Yet another form validator - does good javascript too
 
-$Id: Validate.pm,v 1.63 2004/04/23 16:00:11 pauls Exp $
+$Id: Validate.pm,v 1.68 2004/11/05 17:46:42 pauls Exp $
 
 =head1 SYNOPSIS
 
@@ -1193,10 +1196,12 @@ return the keys of groups that were validated.
 
 =item C<validate>
 
-Arguments are a form hashref or cgi object, and a validation hashref or filename.
+Arguments are a form hashref or cgi object, a validation hashref or filename, and
+an optional what_was_validated arrayref.
 If a CGI object is passed, CGI::Ex::get_form will be called on that object
 to turn it into a hashref.  If a filename is given for the validation, get_validation
-will be called on that filename.
+will be called on that filename.  If the what_was_validated_arrayref is passed - it
+will be populated (pushed) with the field hashes that were actually validated.
 
 If the form passes validation, validate will return undef.  If it fails validation, it
 will return a CGI::Ex::Validate::Error object.  If the 'raise_error' general option

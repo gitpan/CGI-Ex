@@ -20,7 +20,7 @@ use vars qw($VERSION
             %CACHE
             $HTML_KEY
             );
-use CGI::Ex::Dump qw(debug);
+use CGI::Ex::Dump qw(debug dex_warn);
 
 $VERSION = '0.2';
 
@@ -73,7 +73,11 @@ sub read_ref {
 
   ### they passed the right stuff already
   if (ref $file) {
-    return $file;
+    if (UNIVERSAL::isa($file, 'SCALAR')) {
+      return &yaml_load($$file); # allow for ref to a YAML string
+    } else {
+      return $file;
+    }
 
   ### if contains a newline - treat it as a YAML string
   } elsif (index($file,"\n") != -1) {
@@ -109,7 +113,10 @@ sub read_ref {
     $handler = $EXT_READERS{$ext} || die "Unknown file extension: $ext";
   }
 
-  return eval { scalar &$handler($file, $self, $args) };
+  return eval { scalar &$handler($file, $self, $args) } || do {
+    dex_warn "Couldn't read $file: $@" if ! $self->{no_warn_on_failed_read};
+    return undef;
+  };
 }
 
 ### allow for different kinds of merging of arguments
@@ -262,7 +269,15 @@ sub read_handler_html {
   my $args = shift;
   my $key = $args->{html_key} || $self->{html_key} || $HTML_KEY;
   return undef if ! $key || $key !~ /^\w+$/;
-  return undef if ! eval {require YAML};
+  if (! eval {require YAML}) {
+    my $err   = $@;
+    my $found = 0;
+    my $i     = 0;
+    while (my($pkg, $file, $line, $sub) = caller($i++)) {
+      return undef if $sub =~ /\bpreload_files$/;
+    }
+    die $err;
+  }
 
   ### get the html
   my $html = '';

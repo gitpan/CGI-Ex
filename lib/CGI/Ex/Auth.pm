@@ -76,6 +76,11 @@ sub require_auth {
       my $str   = encode_base64(join(":", delete($form->{$key_u}), delete($form->{$key_p})), "");
       my $key_s = $self->key_save;
       $self->set_cookie($str, delete($form->{$key_s}));
+      #return $self->success($user); # assume that cookies will work - if not next page will cause login
+      #### this may actually be the nicer thing to do in the common case - except for the nasty looking
+      #### url - all things considered - should really get location boucing to work properly while being
+      #### able to set a cookie at the same time
+
       if ($has_cookies) {
         return $self->success($user); # assuming if they have cookies - the one we set will work
       } else {
@@ -248,37 +253,37 @@ sub key_cookie_check {
 
 sub key_user {
   my $self = shift;
-  $self->{key_user} = shift if $# != -1;
+  $self->{key_user} = shift if $#_ != -1;
   return $self->{key_user} ||= 'ce_user';
 }
 
 sub key_pass {
   my $self = shift;
-  $self->{key_pass} = shift if $# != -1;
+  $self->{key_pass} = shift if $#_ != -1;
   return $self->{key_pass} ||= 'ce_pass';
 }
 
 sub key_save {
   my $self = shift;
-  $self->{key_save} = shift if $# != -1;
+  $self->{key_save} = shift if $#_ != -1;
   return $self->{key_save} ||= 'ce_save';
 }
 
 sub key_redirect {
   my $self = shift;
-  $self->{key_redirect} = shift if $# != -1;
+  $self->{key_redirect} = shift if $#_ != -1;
   return $self->{key_redirect} ||= 'redirect';
 }
 
 sub form_name {
   my $self = shift;
-  $self->{form_name} = shift if $# != -1;
+  $self->{form_name} = shift if $#_ != -1;
   return $self->{form_name} ||= 'ce_form';
 }
 
 sub allow_htauth {
   my $self = shift;
-  $self->{allow_htauth} = shift if $# != -1;
+  $self->{allow_htauth} = shift if $#_ != -1;
   return $self->{allow_htauth} ||= 0;
 }
 
@@ -402,7 +407,7 @@ sub hook_get_pass_by_user {
   if ($meth = $self->{hook_get_pass_by_user}) {
     return $self->$meth($user, $host);
   }
-  die "get_pass_by_user is a virtual method - please override - or use set_hook_get_pass_by_user";
+  die "hook_get_pass_by_user is a virtual method - please override - or use set_hook_get_pass_by_user";
 }
 
 ###----------------------------------------------------------------###

@@ -1,12 +1,18 @@
 package CGI::Ex::Die;
 
 use strict;
-use vars qw($no_recurse $EXTENDED_ERRORS);
+use vars qw($no_recurse
+            $EXTENDED_ERRORS $SHOW_TRACE $IGNORE_EVAL
+            $ERROR_TEMPLATE
+            $LOG_HANDLER $FINAL_HANDLER
+            );
 
 use CGI::Ex;
-use CGI::Ex::Dump qw(debug);
+use CGI::Ex::Dump qw(debug ctrace dex_html);
 
 BEGIN {
+  $SHOW_TRACE = 0      if ! defined $SHOW_TRACE;
+  $IGNORE_EVAL = 0     if ! defined $IGNORE_EVAL;
   $EXTENDED_ERRORS = 1 if ! defined $EXTENDED_ERRORS;
 }
 
@@ -27,6 +33,12 @@ sub import {
     if (! ref($args{register}) || grep {/die/} @{ $args{register} }) {
       $SIG{__DIE__} = \&die_handler;
     }
+    $SHOW_TRACE      = $args{'show_trace'}      if exists $args{'show_trace'};
+    $IGNORE_EVAL     = $args{'ignore_eval'}     if exists $args{'ignore_eval'};
+    $EXTENDED_ERRORS = $args{'extended_errors'} if exists $args{'extended_errors'};
+    $ERROR_TEMPLATE  = $args{'error_template'}  if exists $args{'error_template'};
+    $LOG_HANDLER     = $args{'log_handler'}     if exists $args{'log_handler'};
+    $FINAL_HANDLER   = $args{'final_handler'}   if exists $args{'final_handler'};
   }
   return 1;
 }
@@ -40,23 +52,26 @@ sub die_handler {
   local $no_recurse = 1;
 
   ### test for eval - if eval - propogate it up
-  if (! $ENV{MOD_PERL}) {
-    my $n = 0;
-    while (my $sub = (caller(++$n))[3]) {
-      next if $sub !~ /eval/;
-      die $err; # die and let the eval catch it
-    }
-  }
+  if (! $IGNORE_EVAL) {
+    if (! $ENV{MOD_PERL}) {
+      my $n = 0;
+      while (my $sub = (caller(++$n))[3]) {
+        next if $sub !~ /eval/;
+        die $err; # die and let the eval catch it
+      }
 
-  ### test for eval in a mod_perl environment
-  my $n     = 0;
-  my $found = 0;
-  while (my $sub = (caller(++$n))[3]) {
-    $found = $n if ! $found && $sub =~ /eval/;
-    last if $sub =~ /^Apache::(PerlRun|Registry)/;
-  }
-  if ($found && $n - 1 != $found) {
-    die $err;
+      ### test for eval in a mod_perl environment
+    } else {
+      my $n     = 0;
+      my $found = 0;
+      while (my $sub = (caller(++$n))[3]) {
+        $found = $n if ! $found && $sub =~ /eval/;
+        last if $sub =~ /^(Apache|ModPerl)::(PerlRun|Registry)/;
+      }
+      if ($found && $n - 1 != $found) {
+        die $err;
+      }
+    }
   }
 
   ### decode the message
@@ -76,25 +91,59 @@ sub die_handler {
     } elsif ($copy =~ m|^syntax error at ([/\w.\-]+) line \d+, near|mi) {
     }
   }
+
+  ### prepare common args
   my $msg = &CGI::Ex::Dump::_html_quote("$err");
   $msg = "<pre style='background:red;color:white;border:2px solid black;font-size:120%;padding:3px'>Error: $msg</pre>\n";
+  my $ctrace = ! $SHOW_TRACE ? ""
+    : "<pre style='background:white;color:black;border:2px solid black;padding:3px'>"
+    . dex_html(ctrace)."</pre>";
+  my $args = {err => "$err", msg => $msg, ctrace => $ctrace};
 
-  ### similar to CGI::Carp
-  if ($ENV{MOD_PERL} && (my $r = Apache->request)) {
-    if ($r->bytes_sent) {
-      $r->print($msg);
-      $r->exit;
-    } else {
-      $r->status(500);
-      $r->custom_response(500,$msg);
+  &$LOG_HANDLER($args) if $LOG_HANDLER;
+
+  ### web based - give more options
+  if ($ENV{REQUEST_METHOD}) {
+    my $cgix = CGI::Ex->new;
+    $| = 1;
+    ### get the template and swap it in
+    # allow for a sub that returns the template
+    # or a string
+    # or a filename (string starting with /)
+    my $out;
+    if ($ERROR_TEMPLATE) {
+      $out = UNIVERSAL::isa($ERROR_TEMPLATE, 'CODE') ? &$ERROR_TEMPLATE($args) # coderef
+        : (substr($ERROR_TEMPLATE,0,1) ne '/') ? $ERROR_TEMPLATE # html string
+        : do { # filename
+          if (open my $fh, $ERROR_TEMPLATE) {
+            read($fh, my $str, -s $ERROR_TEMPLATE);
+            $str; # return of the do
+          } };
     }
-  } elsif ($ENV{REQUEST_METHOD}) {
-    &CGI::Ex::content_type();
-    print $msg;
+    if ($out) {
+      $cgix->swap_template(\$out, $args);
+    } else {
+      $out = $msg.'<p></p>'.$ctrace;
+    }
+
+    ### similar to CGI::Carp
+    if (my $r = $cgix->apache_request) {
+      if ($r->bytes_sent) {
+        $r->print($out);
+      } else {
+        $r->status(500);
+        $r->custom_response(500, $out);
+      }
+    } else {
+      $cgix->print_content_type;
+      print $out;
+    }
   } else {
     ### command line execution
   }
-  
+
+  &$FINAL_HANDLER($args) if $FINAL_HANDLER;
+
   die $err;
 }
 

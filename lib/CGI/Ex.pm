@@ -24,7 +24,7 @@ use vars qw($VERSION
             );
 use base qw(Exporter);
 
-$VERSION               = '1.00';
+$VERSION               = '1.10';
 $PREFERRED_FILL_MODULE ||= '';
 $PREFERRED_CGI_MODULE  ||= 'CGI';
 $PREFERRED_VAL_MODULE  ||= '';
@@ -46,7 +46,8 @@ sub new {
 
 ### allow for holding another classed CGI style object
 sub object {
-  return shift()->{object} ||= do {
+  my $self = ref($_[0]) ? shift : die "Sub \"object\" must be called as a method";
+  return $self->{object} ||= do {
     $PREFERRED_CGI_REQUIRED ||= do {
       my $file = $PREFERRED_CGI_MODULE;
       $file .= ".pm" if $file !~ /\.\w+$/;
@@ -75,7 +76,7 @@ sub AUTOLOAD {
 ### form getter that will act like ->Vars only it will return arrayrefs
 ### for values that are arrays
 sub get_form {
-  my $self = shift || __PACKAGE__;
+  my $self = shift || __PACKAGE__; # may be called as a function or a method
   $self = $self->new if ! ref $self;
 
   ### allow for custom hash
@@ -94,28 +95,28 @@ sub get_form {
 
 ### allow for a setter
 sub set_form {
-  my $self = shift;
+  my $self = ref($_[0]) ? shift : die "Sub \"set_form\" must be called as a method";
   $self->{form} = shift || {};
 }
 
 ### like get_form - but a hashref of cookies
 ### cookies are parsed depending upon the functionality of ->cookie
 sub get_cookies {
-  my $self = shift || __PACKAGE__;
+  my $self = shift || __PACKAGE__; # may be called as a function or a method
   $self = $self->new if ! ref $self;
 
   my $obj  = shift || $self->object;
   my %hash = ();
   foreach my $key ($obj->cookie()) {
     my @val = $obj->cookie($key);
-    $hash{$key} = ($#val == -1) ? die : ($#val == 0) ? $val[0] : \@val;
+    $hash{$key} = ($#val == -1) ? next : ($#val == 0) ? $val[0] : \@val;
   }
   return \%hash;
 }
 
 ### allow for creating a query_string
 sub make_form {
-  my $self = shift;
+  my $self = ref($_[0]) ? shift : die "Sub \"make_form\" must be called as a method";
   my $form = shift || $self->get_form();
   my $keys = (ref $_[0]) ? {map {$_ => 1} @{ shift() }} : undef;
   my $str = '';
@@ -136,22 +137,41 @@ sub make_form {
 
 ###----------------------------------------------------------------###
 
-sub print_content_type {
-  &content_type;
+### allow for shared apache request object
+sub apache_request {
+  my $self = shift || die "Sub \"apache_request\" must be called as a method";
+  return if ! $ENV{'MOD_PERL'};
+  if (ref $self) { # may be called as a object or a class method
+    return $self->{apache_request} ||= Apache->request;
+  } else {
+    return Apache->request;
+  }
+}
+
+### allow for a setter
+sub set_apache_request {
+  my $self = ref($_[0]) ? shift : die "Sub \"set_apache_request\" must be called as an object method";
+  $self->{apache_request} = shift;
+}
+
+###----------------------------------------------------------------###
+
+sub content_type {
+  &print_content_type;
 }
 
 ### will send the Content-type header
-sub content_type {
-  my $self = ref($_[0]) ? shift : undef;
+sub print_content_type {
+  my $self = ref($_[0]) ? shift : __PACKAGE__; # may be called as function or method
   my $type = shift || 'text/html';
 
-  if ($ENV{MOD_PERL} && (my $r = Apache->request)) {
+  if (my $r = $self->apache_request) {
     return if $r->bytes_sent;
     $r->content_type($type);
     $r->send_http_header;
   } else {
     if (! $ENV{CONTENT_TYPED}) {
-      print "Content-type: $type\r\n\r\n";
+      print "Content-Type: $type\r\n\r\n";
       $ENV{CONTENT_TYPED} = '';
     }
     $ENV{CONTENT_TYPED} .= sprintf("%s, %d\n", (caller)[1,2]);
@@ -159,8 +179,8 @@ sub content_type {
 }
 
 sub content_typed {
-  my $self = ref($_[0]) ? shift : undef;
-  if ($ENV{MOD_PERL} && (my $r = Apache->request)) {
+  my $self = ref($_[0]) ? shift : __PACKAGE__; # may be called as function or method
+  if (my $r = $self->apache_request) {
     return $r->bytes_sent;
   } else {
     return ($ENV{CONTENT_TYPED}) ? 1 : undef;
@@ -170,17 +190,18 @@ sub content_typed {
 ###----------------------------------------------------------------###
 
 ### location bounce nicely - even if we have already sent content
+### may be called as function or a method
 sub location_bounce {
-  my $self = shift;
+  my $self = ref($_[0]) ? shift : __PACKAGE__; # may be called as function or method
   my $loc  = shift || '';
-  if (&content_typed()) {
+  if ($self->content_typed) {
     if ($DEBUG_LOCATION_BOUNCE) {
       print "<a class=debug href=\"$loc\">Location: $loc</a><br />\n";
     } else {
       print "<meta http-equiv=\"refresh\" content=\"0;url=$loc\" />\n";
     }
   } else {
-    if ($ENV{MOD_PERL} && (my $r = Apache->request)) {
+    if (my $r = $self->apache_request) {
       $r->header_out("Location", $loc);
       $r->status(302);
       $r->content_type('text/html');
@@ -189,15 +210,16 @@ sub location_bounce {
     } else { 
       print "Location: $loc\r\n",
             "Status: 302 Bounce\r\n",
-            "Content-type: text/html\r\n\r\n",
+            "Content-Type: text/html\r\n\r\n",
             "Bounced to $loc\r\n";
     }
   }
 }
 
 ### set a cookie nicely - even if we have already sent content
+### may be called as function or a method - fancy algo to allow for first argument of args hash
 sub set_cookie {
-  my $self = shift;
+  my $self = UNIVERSAL::isa($_[0], __PACKAGE__) ? shift : __PACKAGE__->new;
   my $args = ref($_[0]) ? shift : {@_};
   foreach (keys %$args) {
     next if /^-/;
@@ -210,13 +232,13 @@ sub set_cookie {
 
   my $cookie = "" . $self->object->cookie(%$args);
 
-  if (&content_typed()) {
-    print "<meta http-equiv=\"Set-cookie\" content=\"$cookie\" />\n";
+  if ($self->content_typed) {
+    print "<meta http-equiv=\"Set-Cookie\" content=\"$cookie\" />\n";
   } else {
-    if ($ENV{MOD_PERL} && (my $r = Apache->request)) {
+    if (my $r = $self->apache_request) {
       $r->header_out("Set-cookie", $cookie);
     } else {
-      print "Set-cookie: $cookie\r\n"
+      print "Set-Cookie: $cookie\r\n"
     }
   }
 }
@@ -224,19 +246,19 @@ sub set_cookie {
 ### print the last modified time
 ### takes a time or filename and an optional keyname
 sub last_modified {
-  my $self = shift;
-  my $time = shift;
+  my $self = ref($_[0]) ? shift : __PACKAGE__; # may be called as function or method
+  my $time = shift || time;
   my $key  = shift || 'Last-Modified';
 
   ### get a time string - looks like:
   ### Mon Dec  9 18:03:21 2002
   ### valid RFC (although not prefered)
-  $time = scalar(gmtime(&time_calc(shift)));
+  $time = scalar(gmtime(&time_calc($time)));
 
-  if (&content_typed()) {
+  if ($self->content_typed) {
     print "<meta http-equiv=\"$key\" content=\"$time\" />\n";
   } else {
-    if ($ENV{MOD_PERL} && (my $r = Apache->request)) {
+    if (my $r = $self->apache_request) {
       $r->header_out($key, $time);
     } else {
       print "$key: $time\r\n"
@@ -246,20 +268,22 @@ sub last_modified {
 }
 
 ### add expires header
-sub expires { 
-  my $self = shift;
-  my $time = shift;
+sub expires {
+  my $self = ref($_[0]) ? shift : __PACKAGE__; # may be called as a function or method
+  my $time = shift || time;
   return $self->last_modified($time, 'Expires');
 }
 
 ### similar to expires_calc from CGI::Util
 ### allows for lenient calling, hour instead of just h, etc
-### takes time or 0 or now or types of -23minutes 
+### takes time or 0 or now or filename or types of -23minutes 
 sub time_calc {
-  my $time = shift;
+  my $time = shift; # may only be called as a function
   if (! $time || lc($time) eq 'now') {
-    $time = time;
-  } elsif ($time =~ m/^([+-]?\s*(?:\d+|\d*\.\d+))\s*(\w)\w*$/) {
+    return time;
+  } elsif ($time =~ m/^\d+$/) {
+    return $time;
+  } elsif ($time =~ m/^([+-]?)\s*(\d+|\d*\.\d+)\s*([a-z])[a-z]*$/i) {
     my $m = {
       's' => 1,
       'm' => 60,
@@ -269,44 +293,47 @@ sub time_calc {
       'M' => 60 * 60 * 24 * 30,
       'y' => 60 * 60 * 24 * 365,
     };
-    $time = time + ($m->{$2} || 1) * $1;
-  } elsif ($time =~ /\D/) {
-    die "Invalid time passed to time_calc ($time)";
+    return time + ($m->{lc($3)} || 1) * "$1$2";
+  } else {
+    my @stat = stat $time;
+    die "Couldn't not find file \"$time\" for time_calc" if $#stat == -1;
+    return $stat[9];
   }
-  return $time;
 }
 
 
 ### allow for generic status send
 sub send_status {
-  my $self = shift;
+  my $self = ref($_[0]) ? shift : __PACKAGE__; # may be called as function or method
   my $code = shift || die "Missing status";
-  my $mesg = shift || "HTTP Status of $code received\n";
-  if (&content_typed()) {
+  my $mesg = shift;
+  if (! defined $mesg) {
+    $mesg = "HTTP Status of $code received\n";
+  }
+  if ($self->content_typed) {
     die "Cannot send a status ($code - $mesg) after content has been sent";
   }
-  if ($ENV{MOD_PERL} && (my $r = Apache->request)) {
+  if (my $r = $self->apache_request) {
     $r->status($code);
     $r->content_type('text/html');
     $r->send_http_header;
     $r->print($mesg);
   } else {
     print "Status: $code\r\n";
-    &content_type();
+    $self->print_content_type;
     print $mesg;
   }
 }
 
 ### allow for sending a simple header
 sub send_header {
-  my $self = shift;
+  my $self = ref($_[0]) ? shift : __PACKAGE__; # may be called as function or method
   my $key  = shift;
   my $value = shift;
-  if (&content_typed()) {
+  if ($self->content_typed) {
     die "Cannot send a header ($key - $value) after content has been sent";
   }
-
-  if ($ENV{MOD_PERL} && (my $r = Apache->request)) {
+  if (my $r = $self->apache_request) {
     $r->header_out($key, $value);
   } else {
     print "$key: $value\r\n";
@@ -318,7 +345,7 @@ sub send_header {
 ### allow for printing out a static javascript file
 ### for example $self->print_js("CGI::Ex::validate.js");
 sub print_js {
-  my $self    = shift;
+  my $self    = shift || die "Sub \"print_js\" must be called as a method";
   my $js_file = shift || '';
 
   ### fix up the file - force .js on the end
@@ -343,14 +370,21 @@ sub print_js {
 
   ### no - file - 404
   if (! $stat) {
-    return $self->send_status(404, "JS File not found for print_js\n");
+    if (! $self->content_typed) {
+      $self->send_status(404, "JS File not found for print_js\n");
+    } else {
+      print "<h1>JS File not found for print_js</h1>\n";
+    }
+
+    return;
   }
 
   ### do headers
-  $self->last_modified($stat->[9]);
-  $self->expires('+ 1 year');
-  $self->send_header('Content-length', $stat->[7] || 0);
-  &content_type('application/x-javascript');
+  if (! $self->content_typed) {
+    $self->last_modified($stat->[9]);
+    $self->expires('+ 1 year');
+    $self->print_content_type('application/x-javascript');
+  }
 
   return if $ENV{REQUEST_METHOD} && $ENV{REQUEST_METHOD} eq 'HEAD';
 
@@ -359,6 +393,8 @@ sub print_js {
     local $/ = undef;
     print <IN>;
     close IN;
+  } else {
+    die "Couldn't open file  $js_file: $!";
   }
 }
 
@@ -366,7 +402,7 @@ sub print_js {
 
 ### form filler that will use either HTML::FillInForm, CGI::Ex::Fill
 ### or another specified filler.  Argument style is similar to
-### HTML::FillInForm.
+### HTML::FillInForm.  May be called as a method or a function.
 sub fill {
   my $self = shift;
   my $args = shift;
@@ -451,7 +487,7 @@ sub fill {
 ###----------------------------------------------------------------###
 
 sub validate {
-  my $self = shift;
+  my $self = shift || die "Sub \"validate\" must be called as a method";
   my ($form, $file) = (@_ == 2) ? (shift, shift) : ($self->object, shift);
 
   require CGI::Ex::Validate;
@@ -464,7 +500,7 @@ sub validate {
 ###----------------------------------------------------------------###
 
 sub conf_obj {
-  my $self = shift;
+  my $self = shift || die "Sub \"conf_obj\" must be called as a method";
   return $self->{conf_obj} ||= do {
     require CGI::Ex::Conf;
     CGI::Ex::Conf->new(@_);
@@ -472,7 +508,7 @@ sub conf_obj {
 }
 
 sub conf_read {
-  my $self = shift;
+  my $self = shift || die "Sub \"conf_read\" must be called as a method";
   return $self->conf_obj->read(@_);
 }
 
@@ -484,7 +520,7 @@ sub conf_read {
 ### system such as Template::Toolkit (even though they should
 ### investigate them because they are pretty nice)
 sub swap_template {
-  my $self = shift;
+  my $self = shift || die "Sub \"swap_template\" must be called as a method";
   my $str  = shift;
   return $str if ! $str;
   my $ref  = ref($str) ? $str : \$str;
@@ -574,7 +610,7 @@ CGI::Ex - Yet Another Form Utility
   my $hashref = $cgix->get_form; # uses CGI by default
   
   ### send the Content-type header - whether or not we are mod_perl
-  $cgix->content_type;
+  $cgix->print_content_type;
 
   my $val_hash = $cgix->conf_read($pathtovalidation);
 
@@ -681,6 +717,11 @@ A general use configuration, or settings, or key / value file reader.  Has
 ability for providing key fallback as well as immutable key definitions.  Has
 default support for yaml, storable, perl, ini, and xml and open architecture
 for definition of others.  See L<CGI::Ex::Conf> for more information.
+
+=item C<CGI::Ex::App>
+
+A general purpose application framework.  Somewhat like CGI::Application - but
+it does more of the common tasks for you.
 
 =back
 
@@ -807,7 +848,8 @@ be read in depending upon file extension.
 =item C<-E<gt>get_form>
 
 Very similar to CGI->new->Vars except that arrays are returned as
-arrays.  Not sure why CGI::Val didn't do this anyway.
+arrays.  Not sure why CGI::Val didn't do this anyway (well - yes -
+legacy Perl 4 - but at some point things need to be updated).
 
 =item C<-E<gt>set_form>
 
@@ -954,9 +996,7 @@ at the time of this writing (I'm sure this probably isn't exaustive).
 
 =head1 TODO
 
-Add an integrated template toolkit interface.
-
-Add an integrated debug module.
+Allow for mod_perl 2 header support.
 
 =head1 MODULES
 
@@ -966,11 +1006,13 @@ See also L<CGI::Ex::Validate>.
 
 See also L<CGI::Ex::Conf>.
 
+See also L<CGI::Ex::Dump>.
+
 See also L<CGI::Ex::Die>.
 
 See also L<CGI::Ex::App>.
 
-See also L<CGI::Ex::Dump>.
+See also L<CGI::Ex::Auth>.
 
 =head1 AUTHOR
 
