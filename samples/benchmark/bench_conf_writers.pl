@@ -2,7 +2,7 @@
 
 use strict;
 use vars qw($PLACEHOLDER);
-use Benchmark qw(cmpthese);
+use Benchmark qw(cmpthese timethese);
 use CGI::Ex::Conf;
 use POSIX qw(tmpnam);
 
@@ -15,7 +15,6 @@ my %files = ();
 
 ###----------------------------------------------------------------###
 
-# [pauls@localhost lib]$ perl ../t/samples/bench_conf_readers.pl
 #         Rate   yaml  yaml2    sto     pl    xml g_conf    ini   sto2
 #yaml    250/s     --    -1%   -14%   -14%   -61%   -77%   -95%   -95%
 #yaml2   254/s     1%     --   -13%   -13%   -60%   -77%   -95%   -95%
@@ -95,6 +94,14 @@ $files{g_conf} = $file2;
 
 
 ### load in the rest of the tests that we support
+if (eval {require JSON}) {
+  my $_file = tmpnam(). '.json';
+  $TESTS{json} = sub {
+    $cob->write_ref($file, $str);
+  };
+  $files{json} = $_file;
+}
+
 if (eval {require Storable}) {
   my $_file = $tmpnam. '.sto';
   $TESTS{sto} = sub {
@@ -158,7 +165,7 @@ foreach my $key (keys %TESTS) {
 }
 
 
-cmpthese($n, \%TESTS);
+cmpthese timethese ($n, \%TESTS);
 
 ### comment out this line to inspect files
 unlink $_ foreach values %files;

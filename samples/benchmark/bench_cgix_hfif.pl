@@ -1,6 +1,5 @@
 #!/usr/bin/perl -w
 
-# [pauls@localhost lib]$ perl ../t/samples/bench_cgix_hfif.pl
 # Benchmark: timing 1000 iterations of cgix_func, cgix_meth, hfif...
 #  cgix_func:  1 wallclock secs ( 1.41 usr +  0.01 sys =  1.42 CPU) @ 704.23/s (n=1000)
 #  cgix_meth:  2 wallclock secs ( 1.47 usr +  0.00 sys =  1.47 CPU) @ 680.27/s (n=1000)
@@ -15,8 +14,6 @@ use strict;
 use Benchmark qw(cmpthese);
 use HTML::FillInForm;
 use CGI::Ex;
-
-my $n = 1000;
 
 my $t = q{
 
@@ -84,7 +81,7 @@ my $x = $fo->fill(scalarref => \$t,
 #print $x;
 #exit;
 
-cmpthese($n, {
+cmpthese(-2, {
   hfif => sub {
     my $copy = $t;
     my $new = $fif->fill(scalarref => \$copy,
